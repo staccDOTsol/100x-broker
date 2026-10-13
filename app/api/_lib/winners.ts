@@ -98,8 +98,9 @@ async function newSigs(
   let newest: string | undefined;
   let hit = false;
   while (out.length < maxSigs && !hit) {
+    // `until` makes the RPC stop at the cursor itself, so a quiet account answers with an empty page instead of 1000 old rows
     const page = await retry(() =>
-      c.getSignaturesForAddress(key, { limit: 1000, before }),
+      c.getSignaturesForAddress(key, { limit: 1000, before, until: cursor }),
     );
     if (!page.length) break;
     newest ??= page[0].signature;

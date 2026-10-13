@@ -1,10 +1,17 @@
 // Server-side Helius DAS lookup. The key lives only in HELIUS_RPC_URL.
+import { memo } from "./memo.js";
+
 export type Asset = { mint: string; name: string; symbol: string; image: string | null; decimals: number };
 
-export async function getAsset(mint: string): Promise<Asset> {
+/** Token metadata barely changes: an hour fresh, a day stale, per instance. Lookups that fail are not cached. */
+export function getAsset(mint: string): Promise<Asset> {
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) return Promise.reject(new Error("bad mint"));
+  return memo(`das:${mint}`, 3_600_000, 86_400_000, () => fetchAsset(mint));
+}
+
+async function fetchAsset(mint: string): Promise<Asset> {
   const upstream = process.env.HELIUS_RPC_URL;
   if (!upstream) throw new Error("HELIUS_RPC_URL not configured");
-  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(mint)) throw new Error("bad mint");
   const r = await fetch(upstream, {
     method: "POST",
     headers: { "content-type": "application/json" },

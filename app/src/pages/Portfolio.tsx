@@ -11,23 +11,27 @@ import { useUnderlying } from "../hooks/underlying";
 import { buildSettleTx, toV0, type MarketView } from "../lib/chain";
 import { loadPortfolio, MEME_DECIMALS, positionValue, type Position } from "../lib/portfolio";
 import { fetchFeed } from "../lib/feed";
-import { aggregatePnl, basisByPosition, fmtAge, fmtAnnual, positionPnl, type Pnl } from "../lib/pnl";
+import { aggregatePnl, basisByPosition, fmtAge, fmtAnnual, positionPnl, type Basis, type Pnl } from "../lib/pnl";
 import { exitIxs, planExit, redeemIxs } from "../lib/exit";
 import { backIxs, exitGain, MIN_SHARE_LAMPORTS, raiseOpen, shareLamports } from "../lib/backable";
 import { poolState, tokensForLamports, withdrawCapacity, withdrawOut, withdrawSolIx } from "../lib/zap";
 import { claimFeesIx, cu } from "../lib/hooked";
 import { shareUrl } from "../lib/ref";
 import { setHash } from "../lib/url";
-import { ShareSheet, type ShareTarget } from "../components/ShareSheet";
+import type { ShareTarget } from "../components/ShareSheet";
 import { Feed } from "../components/Live";
 import { WalletButton } from "../components/bits";
 import { useToasts } from "../components/Toasts";
-import { ago, amount as fmtAmount, lev, pct, short, usd } from "../lib/format";
+import { CardShare } from "../components/Share";
+import { Delta, Flash, Rolling, Sparkline } from "../components/Pulse";
+import { ago, amount as fmtAmount, lev, pct, short, usd, usdPrice } from "../lib/format";
 import { Flex, bust, siteShare } from "../components/Flex";
 import { HERO_MARKET, MEME_SYMBOL, PUMP_URL, RFSTACC } from "../config";
 
 const SIDE = ["UP", "DOWN"] as const;
 const cls = (s: 0 | 1) => (s === 0 ? "up" : "down");
+/** "+$12.34" / "−$5.00" from a USD number. */
+const signed = (u: number) => `${u < 0 ? "−" : "+"}${usd(Math.abs(u))}`;
 
 export default function PortfolioPage() {
   const { wallet } = useParams();
@@ -45,10 +49,9 @@ export default function PortfolioPage() {
   if (wallet && !owner)
     return (
       <div className="empty">
-        <div className="display">That isn't a wallet.</div>
-        <p>Not even a burner.</p>
+        <div className="display">Not a wallet.</div>
         <Link className="btn ghost" to="/">
-          Back to the board
+          Board →
         </Link>
       </div>
     );
@@ -56,7 +59,6 @@ export default function PortfolioPage() {
     return (
       <div className="empty">
         <div className="display">Your bag.</div>
-        <p>Connect and we'll show every side you're on, what it's worth at the curve and at the pot, and the way out.</p>
         <WalletButton />
       </div>
     );
@@ -71,7 +73,6 @@ function Bag({ owner, mine }: { owner: PublicKey; mine: boolean }) {
   const send = useSend();
   const toasts = useToasts();
   const { publicKey } = useWallet();
-  const [share, setShare] = useState<ShareTarget | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [armed, setArmed] = useState(false);
   const b = book.data;
@@ -157,15 +158,15 @@ function Bag({ owner, mine }: { owner: PublicKey; mine: boolean }) {
       .sort((a, c) => c.best - a.best);
   }, [b, basis]);
   const agg = useMemo(() => (basis ? aggregatePnl(vals.map((x) => x.pnl)) : null), [vals, basis]);
-  const usdSigned = (q: number) => {
-    const u = px.priceUsd(q);
-    return u === null ? "—" : `${u < 0 ? "−" : "+"}${usd(Math.abs(u))}`;
-  };
   const n = vals.length;
   const markets = new Set(vals.map((x) => x.p.v.acct.key.toBase58())).size;
   const curveTotal = vals.reduce((s, x) => s + x.curve, 0);
   const potTotal = vals.reduce((s, x) => s + x.pot, 0);
   const worth = px.priceUsd(vals.reduce((s, x) => s + x.best, 0));
+  // the biggest payout multiple anywhere in this bag, straight from the live sides
+  const topLev = vals.reduce((m, x) => Math.max(m, x.p.v.side[x.p.side].leverage), 0);
+  const unrealUsd = agg ? px.priceUsd(agg.unrealized) : null;
+  const realUsd = agg ? px.priceUsd(agg.realized) : null;
 
   // chores that put money on this wallet's side of the table
   const chores = useMemo(() => {
@@ -190,28 +191,33 @@ function Bag({ owner, mine }: { owner: PublicKey; mine: boolean }) {
     return out;
   }, [vals]);
 
+  const sides = `${n} side${n === 1 ? "" : "s"}`;
   const bagShare: ShareTarget = {
-    title: mine ? "My 100× bag" : `${short(o)}'s 100× bag`,
+    title: mine ? `My bag · ${sides}` : `${short(o)}'s bag · ${sides}`,
     text: mine
-      ? `My ±100× bag on 100x.broker: ${n} side${n === 1 ? "" : "s"}, ${usd(worth)} on the table. Up or down, no liquidations, somebody's paying me.`
-      : `${short(o)} is running ${n} side${n === 1 ? "" : "s"} at ±100× on 100x.broker. Somebody's paying them.`,
+      ? `My bag on 100x.broker: ${sides}, ${usd(worth)} on the table${n ? `, pays up to ${lev(topLev)}` : ""}. Up or down, no liquidations, somebody's paying me.`
+      : `${short(o)} is running ${sides} on 100x.broker${n ? `, paying up to ${lev(topLev)}` : ""}. Somebody's paying them.`,
     url: shareUrl(`/p/${o}`, publicKey),
     image: `/api/og?owner=${o}&${bust()}`,
-    filename: `${short(o)}-100x-bag.png`,
+    filename: `${short(o)}-bag.png`,
   };
+  const bagTweet = mine
+    ? `${sides} · ${usd(worth)} on the table${n ? ` · pays up to ${lev(topLev)}` : ""} · no liquidations`
+    : `${short(o)}: ${sides} · ${usd(worth)} on the table${n ? ` · pays up to ${lev(topLev)}` : ""}`;
   const positionShare = (p: Position, value: number, pnl?: Pnl | null): ShareTarget => {
     const key = p.v.acct.key.toBase58();
     const usdS = (q: number) => {
       const u = px.priceUsd(q);
       return u === null ? "—" : `${u < 0 ? "−" : "+"}${usd(Math.abs(u))}`;
     };
+    const lv = lev(p.v.side[p.side].leverage);
     const result = pnl ? ` ${fmtAnnual(pnl.ret)} in ${fmtAge(pnl.days)} (realized ${usdS(pnl.realized)}, unrealized ${usdS(pnl.unrealized)}).` : "";
     return {
-      title: `${SIDE[p.side]} 100× on $${p.v.ticker}`,
-      text: `${mine ? "I'm" : `${short(o)} is`} ${SIDE[p.side]} 100× on $${p.v.ticker}.${result} ${lev(p.v.side[p.side].leverage)} payout if it ${p.side === 0 ? "pumps" : "dumps"}, ${usd(px.priceUsd(value))} on the line, zero chance of liquidation.`,
+      title: `${SIDE[p.side]} ${lv} on $${p.v.ticker}`,
+      text: `${mine ? "I'm" : `${short(o)} is`} ${SIDE[p.side]} on $${p.v.ticker}.${result} ${lv} payout if it ${p.side === 0 ? "pumps" : "dumps"}, ${usd(px.priceUsd(value))} on the line, zero chance of liquidation.`,
       url: shareUrl(`/m/${key}?side=${p.side}`, publicKey),
       image: `/api/og?m=${key}&side=${p.side}&owner=${o}&${bust()}`,
-      filename: `${p.v.ticker}-${SIDE[p.side]}-100x.png`,
+      filename: `${p.v.ticker}-${SIDE[p.side]}.png`,
     };
   };
   const copy = (url: string, title: string, body: string) => {
@@ -228,60 +234,8 @@ function Bag({ owner, mine }: { owner: PublicKey; mine: boolean }) {
           </div>
           <h1 className="display">{mine ? "Your bag." : `${short(o)}'s bag.`}</h1>
           <div className="addr">{o}</div>
-          <div className="worth display num" aria-live="polite">
-            {b ? usd(worth) : <span className="skeleton" style={{ width: 200, height: 48 }} />}
-          </div>
-          <div className="split meta num">
-            <span>
-              {n} side{n === 1 ? "" : "s"} on {markets} market{markets === 1 ? "" : "s"}
-            </span>
-            <span>at curve {usd(px.priceUsd(curveTotal))}</span>
-            <span>at pot {usd(px.priceUsd(potTotal))}</span>
-            <span>dry powder {b ? `${fmtAmount(b.sol, 9, 3)} SOL` : "—"}</span>
-            {b && b.quote > 0n && <span>loose change {usd(px.quoteUsd(b.quote))}</span>}
-          </div>
-          <div className="pnl-strip" aria-label="Profit and loss">
-            {basis === null ? (
-              <span className="meta">P&amp;L …</span>
-            ) : agg ? (
-              <>
-                <div className="pnl-cell">
-                  <span className="meta">realized</span>
-                  <strong className={`num ${agg.realized >= 0 ? "up" : "down"}`}>{usdSigned(agg.realized)}</strong>
-                  <span className="meta num">taken out, net of cost</span>
-                </div>
-                <div className="pnl-cell">
-                  <span className="meta">unrealized</span>
-                  <strong className={`num ${agg.unrealized >= 0 ? "up" : "down"}`}>{usdSigned(agg.unrealized)}</strong>
-                  <span className="meta num">held now vs what it cost</span>
-                </div>
-                <div className="pnl-cell">
-                  <span className="meta">return</span>
-                  <strong className={`num ${agg.ret >= 0 ? "up" : "down"}`}>{fmtAnnual(agg.ret)}</strong>
-                  <span className="meta num">
-                    on {usd(px.priceUsd(agg.cost))} in · {fmtAge(agg.days)} avg hold
-                  </span>
-                </div>
-                <div className="pnl-cell">
-                  <span className="meta">simple · per year</span>
-                  <strong className={`num ${(agg.apr ?? 0) >= 0 ? "up" : "down"}`}>{fmtAnnual(agg.apr)}</strong>
-                  <span className="meta num">return × 365 ÷ days held</span>
-                </div>
-                <div className="pnl-cell">
-                  <span className="meta">compounded · per year</span>
-                  <strong className={`num ${(agg.apy ?? 0) >= 0 ? "up" : "down"}`}>{fmtAnnual(agg.apy)}</strong>
-                  <span className="meta num">if it kept doing this</span>
-                </div>
-              </>
-            ) : (
-              <span className="meta">no buys on record for this bag, so no P&amp;L</span>
-            )}
-          </div>
         </div>
         <div className="bag-actions">
-          <button className="btn" onClick={() => setShare(bagShare)} disabled={!b}>
-            Flex bag
-          </button>
           <button className="btn ghost" onClick={() => copy(bagShare.url, "Link copied", publicKey ? "Your wallet rides along as the referrer." : "Deep link to this bag.")}>
             Copy link
           </button>
@@ -302,33 +256,76 @@ function Bag({ owner, mine }: { owner: PublicKey; mine: boolean }) {
         </div>
       </header>
 
+      <div className="bag-stats" aria-live="polite">
+        <div className="panel stat-card">
+          <span className="meta">On the table</span>
+          <Flash watch={worth} className="display num">
+            {!b ? <span className="skeleton" style={{ width: 120, height: 28 }} /> : worth === null ? "—" : <Rolling value={worth} format={usd} />}
+          </Flash>
+          <span className="meta num">
+            curve {usd(px.priceUsd(curveTotal))} · pot {usd(px.priceUsd(potTotal))}
+          </span>
+          <CardShare text={bagTweet} path={`/p/${o}`} target={bagShare} />
+        </div>
+        <div className="panel stat-card">
+          <span className="meta">Unrealized</span>
+          <Flash watch={unrealUsd} className={`display num ${unrealUsd === null ? "" : unrealUsd >= 0 ? "up" : "down"}`}>
+            {basis === null ? "…" : unrealUsd === null ? "—" : <Rolling value={unrealUsd} format={signed} />}
+          </Flash>
+          <span className="meta num">{agg ? `${fmtAnnual(agg.ret)} · ${fmtAge(agg.days)}` : "no buys on record"}</span>
+        </div>
+        <div className="panel stat-card">
+          <span className="meta">Realized</span>
+          <Flash watch={realUsd} className={`display num ${realUsd === null ? "" : realUsd >= 0 ? "up" : "down"}`}>
+            {basis === null ? "…" : realUsd === null ? "—" : <Rolling value={realUsd} format={signed} />}
+          </Flash>
+          <span className="meta num">{agg ? `${fmtAnnual(agg.apr)} simple · ${fmtAnnual(agg.apy)} compounded` : "—"}</span>
+        </div>
+        <div className="panel stat-card">
+          <span className="meta">Sides open</span>
+          <Flash watch={n} className="display num">
+            {b ? n : "…"}
+          </Flash>
+          <span className="meta num">
+            {markets} market{markets === 1 ? "" : "s"}
+            {n > 0 && ` · pays up to ${lev(topLev)}`}
+          </span>
+        </div>
+      </div>
+
       <section className="panel bag-positions" id="positions">
         <h2 className="meta">
           <Anchor id="positions" />
-          {mine ? "Sides you're on" : "Sides they're on"}
+          {mine ? "Your sides" : "Their sides"}
         </h2>
         {!b ? (
           <span className="skeleton" style={{ height: 120 }} />
         ) : n === 0 ? (
-          <p className="note">
-            Nothing in the bag. Spectating is free; it also pays nothing. <Link to="/">Pick a side →</Link>
-          </p>
+          <div className="empty bag-empty">
+            <div className="display">Empty bag.</div>
+            <Link className="btn" to="/">
+              Pick a side →
+            </Link>
+          </div>
         ) : (
-          <ol className="pos-list">
-            {vals.map(({ p, curve, pot, best, via, pnl }) => (
-              <PosRow
+          <ol className="cards pos-cards">
+            {vals.map(({ p, units, curve, pot, best, via, pnl }) => (
+              <PosCard
                 key={p.key}
                 p={p}
+                units={units}
                 curve={curve}
                 pot={pot}
                 best={best}
                 via={via}
                 pnl={pnl}
+                entry={basis?.get(`${p.v.acct.key.toBase58()}:${p.side}`)}
                 mine={mine}
+                owner={o}
                 busy={busy}
+                target={positionShare(p, best, pnl)}
                 onExit={() => exit(p)}
                 onCash={() => cashOut(p)}
-                onFlex={() => setShare(positionShare(p, best, pnl))}
               />
             ))}
           </ol>
@@ -349,22 +346,23 @@ function Bag({ owner, mine }: { owner: PublicKey; mine: boolean }) {
             <section className="panel" id="chores">
               <h2 className="meta">
                 <Anchor id="chores" />
-                Money on your side of the table
+                Owed to you
               </h2>
               {chores.map((c) => (
                 <div className="panel-row" key={c.id}>
                   {c.kind === "settle" || c.kind === "waiting" ? (
-                    <span>
-                      ${c.v.ticker}: <b className={cls(c.side)}>{SIDE[c.side]}</b> owes your pot <b className="num">{pct(c.amount, 1)}</b> of its curve
-                      {c.kind === "waiting" && <span className="muted"> · its curve is empty, so it pays the second anyone buys {SIDE[c.side]}</span>}
+                    <span className="num">
+                      ${c.v.ticker} · <b className={cls(c.side)}>{SIDE[c.side]}</b> owes <b>{pct(c.amount, 1)}</b>
                     </span>
                   ) : (
-                    <span>
-                      ${c.v.ticker}: <b className="num">{usd(px.priceUsd(c.amount))}</b> in tips still sitting on the curves
+                    <span className="num">
+                      ${c.v.ticker} · <b>{usd(px.priceUsd(c.amount))}</b> tips
                     </span>
                   )}
                   {c.kind === "waiting" ? (
-                    <span className="meta nowrap">waiting</span>
+                    <span className="chip" title={`Pays the second anyone buys ${SIDE[c.side]}`}>
+                      empty curve
+                    </span>
                   ) : (
                     <button
                       className={`btn small ${c.kind === "tips" ? "ghost" : ""}`}
@@ -387,7 +385,9 @@ function Bag({ owner, mine }: { owner: PublicKey; mine: boolean }) {
             </h2>
             <div className="panel-row">
               <span className="muted">SOL</span>
-              <span className="num">{b ? `${fmtAmount(b.sol, 9, 4)} · ${usd(px.lamportsUsd(b.sol))}` : "—"}</span>
+              <Flash watch={b ? Number(b.sol) : null} className="num">
+                {b ? `${fmtAmount(b.sol, 9, 4)} · ${usd(px.lamportsUsd(b.sol))}` : "—"}
+              </Flash>
             </div>
             <div className="panel-row">
               <span className="muted">Loose change</span>
@@ -403,7 +403,10 @@ function Bag({ owner, mine }: { owner: PublicKey; mine: boolean }) {
                 )}
               </span>
             </div>
-            <p className="note">Rounding leaves crumbs behind on every trade. They're yours; sweeping turns them back into SOL.</p>
+            <details className="bag-why">
+              <summary className="meta">loose change?</summary>
+              <p className="note">Rounding crumbs from every trade. Yours; sweeping turns them back into SOL.</p>
+            </details>
           </section>
           <section className="panel" id="coin">
             <h2 className="meta">
@@ -411,102 +414,134 @@ function Bag({ owner, mine }: { owner: PublicKey; mine: boolean }) {
             </h2>
             <div className="panel-row">
               <span className="muted">Held</span>
-              <span className="num">{b ? fmtAmount(b.meme, MEME_DECIMALS, 0) : "—"}</span>
+              <Flash watch={b ? Number(b.meme) : null} className="num">
+                {b ? fmtAmount(b.meme, MEME_DECIMALS, 0) : "—"}
+              </Flash>
             </div>
             <div className="panel-row">
-              <span className="muted">30% of every fee buys this and burns it. Burning yours pays you from that pot, +3%.</span>
+              <details className="bag-why">
+                <summary className="meta">burn bounty?</summary>
+                <p className="note">30% of every fee buys this and burns it. Burning yours pays you from that pot, +3%.</p>
+              </details>
               <span className="bag-links">
                 {HERO_MARKET && (
                   <Link className="btn ghost small" to={`/m/${HERO_MARKET}#burn`}>
-                    Burn for the bounty
+                    Burn
                   </Link>
                 )}
                 <a className="btn ghost small" href={PUMP_URL} target="_blank" rel="noreferrer">
-                  Buy on pump
+                  Buy
                 </a>
               </span>
             </div>
           </section>
         </div>
       </div>
-      {share && <ShareSheet target={share} onClose={() => setShare(null)} />}
     </>
   );
 }
 
-function PosRow({
-  p, curve, pot, best, via, pnl, mine, busy, onExit, onCash, onFlex,
+function PosCard({
+  p, units, curve, pot, best, via, pnl, entry, mine, owner, busy, target, onExit, onCash,
 }: {
-  p: Position; curve: number; pot: number; best: number; via: "curve" | "pot"; pnl: Pnl | null | undefined; mine: boolean; busy: string | null;
-  onExit: () => void; onCash: () => void; onFlex: () => void;
+  p: Position; units: number; curve: number; pot: number; best: number; via: "curve" | "pot"; pnl: Pnl | null | undefined; entry: Basis | undefined;
+  mine: boolean; owner: string; busy: string | null; target: ShareTarget; onExit: () => void; onCash: () => void;
 }) {
   const under = useUnderlying(p.v.underlyingMint);
   const px = usePrices();
-  const usdSigned = (q: number) => {
-    const u = px.priceUsd(q);
-    return u === null ? "—" : `${u < 0 ? "−" : "+"}${usd(Math.abs(u))}`;
-  };
   const s = p.v.side[p.side];
   const key = p.v.acct.key.toBase58();
   const ticker = under?.symbol ?? p.v.ticker;
+  const value = px.priceUsd(best);
+  const other = px.priceUsd(via === "curve" ? pot : curve);
+  // per-token entry (what this wallet paid, from its own buys) vs what a token fetches now, both in USD
+  const entryPx = entry && entry.tokIn > 0 ? px.priceUsd(entry.inQ / entry.tokIn) : null;
+  const nowPx = units > 0 ? px.priceUsd(best / units) : null;
+  const tone = pnl ? (pnl.unrealized >= 0 ? "up" : "down") : "";
+  const tweet = `${mine ? "I'm" : `${short(owner)} is`} ${SIDE[p.side]} on $${ticker} · pays ${lev(s.leverage)} · ${usd(value)} on the line`;
   return (
-    <li className="pos">
-      <Link to={`/m/${key}?side=${p.side}&tab=sell`} className="pos-id">
-        {under?.image && <img className="tokimg" src={under.image} alt="" />}
+    <li className={`card pos-card ${cls(p.side)}`}>
+      <div className="card-head">
+        <Link to={`/m/${key}?side=${p.side}&tab=sell`} className="card-ticker">
+          {under?.image && <img className="tokimg" src={under.image} alt="" />}${ticker}
+        </Link>
+        <Flash watch={s.leverage} className={`side-badge ${cls(p.side)}`}>
+          {SIDE[p.side]} · pays {lev(s.leverage)}
+        </Flash>
+      </div>
+      <div className="card-px">
+        <Flash watch={value} className={`num ${tone}`} as="b">
+          {usd(value)}
+        </Flash>
+        {pnl ? <Delta x={pnl.ret} /> : pnl === undefined ? <span className="delta flat">…</span> : null}
+        <span className="meta num">at {via}</span>
+      </div>
+      <Sparkline series={p.v.oracle.series} base={p.v.oracle.lastTwap} w={240} h={48} className="card-spark pos-spark" label={`${ticker} oracle, last hour`} />
+      <div className="pos-facts num">
         <span>
-          <b className={cls(p.side)}>{SIDE[p.side]} 100×</b> on ${ticker}
+          <span className="meta">entry</span>
+          <b>{entryPx === null ? "—" : usdPrice(entryPx)}</b>
         </span>
-      </Link>
-      <span className="pos-amt num">
-        {fmtAmount(p.amt, s.decimals, 2)} <span className="meta">{s.symbol}</span>
-      </span>
-      <span className="pos-val num">
-        <b>{usd(px.priceUsd(best))}</b>
-        <span className="meta">
-          {via === "curve" ? "at curve" : "at pot"} · {usd(px.priceUsd(via === "curve" ? pot : curve))} the other way
+        <span>
+          <span className="meta">now</span>
+          <Flash watch={nowPx} className={tone} as="b">
+            {nowPx === null ? "—" : usdPrice(nowPx)}
+          </Flash>
         </span>
-      </span>
-      <span className="pos-meta meta num">
-        {lev(s.leverage)} payout
-        {s.owed > 1e-6 && <> · curve {pct(s.owed, 1)} in the hole</>}
-        {s.atFloor && <> · curve at floor</>}
-      </span>
-      <span className="pos-pnl num">
-        {pnl === undefined ? (
-          <span>P&amp;L …</span>
-        ) : pnl === null ? (
-          <span>no buy on record here, so no entry price</span>
-        ) : (
+        <span>
+          <span className="meta">held</span>
+          <b>
+            {fmtAmount(p.amt, s.decimals, 2)} <span className="meta">{s.symbol}</span>
+          </b>
+        </span>
+        <span>
+          <span className="meta">other door</span>
+          <b>{usd(other)}</b>
+        </span>
+        {pnl && (
           <>
             <span>
-              realized <b className={pnl.realized >= 0 ? "up" : "down"}>{usdSigned(pnl.realized)}</b>
+              <span className="meta">realized</span>
+              <b className={pnl.realized >= 0 ? "up" : "down"}>{signed(px.priceUsd(pnl.realized) ?? 0)}</b>
             </span>
             <span>
-              unrealized <b className={pnl.unrealized >= 0 ? "up" : "down"}>{usdSigned(pnl.unrealized)}</b>
+              <span className="meta">unrealized</span>
+              <Flash watch={pnl.unrealized} className={pnl.unrealized >= 0 ? "up" : "down"} as="b">
+                {signed(px.priceUsd(pnl.unrealized) ?? 0)}
+              </Flash>
             </span>
             <span>
-              <b className={pnl.ret >= 0 ? "up" : "down"}>{fmtAnnual(pnl.ret)}</b> in {fmtAge(pnl.days)}
+              <span className="meta">held for</span>
+              <b>{fmtAge(pnl.days)}</b>
             </span>
-            <span>simple {fmtAnnual(pnl.apr)}/yr</span>
-            <span>compounded {fmtAnnual(pnl.apy)}/yr</span>
+            <span>
+              <span className="meta">per year</span>
+              <b className={(pnl.apr ?? 0) >= 0 ? "up" : "down"}>{fmtAnnual(pnl.apr)}</b>
+            </span>
           </>
         )}
-      </span>
-      <span className="pos-actions">
-        {mine && (
-          <button className="btn small" disabled={!!busy} data-loading={busy === `x${p.key}`} onClick={onExit}>
-            Exit
-          </button>
-        )}
-        {mine && (
-          <button className="btn ghost small" disabled={!!busy} data-loading={busy === `c${p.key}`} onClick={onCash}>
-            Cash out at pot
-          </button>
-        )}
-        <button className="chip" onClick={onFlex}>
-          flex
-        </button>
-      </span>
+      </div>
+      {(s.owed > 1e-6 || s.atFloor) && (
+        <div className="pos-flags">
+          {s.owed > 1e-6 && <span className="chip down">curve owes {pct(s.owed, 1)}</span>}
+          {s.atFloor && <span className="chip">curve at floor</span>}
+        </div>
+      )}
+      <div className="card-foot pos-foot">
+        <span className="pos-actions">
+          {mine && (
+            <button className="btn small" disabled={!!busy} data-loading={busy === `x${p.key}`} onClick={onExit}>
+              Exit
+            </button>
+          )}
+          {mine && (
+            <button className="btn ghost small" disabled={!!busy} data-loading={busy === `c${p.key}`} onClick={onCash}>
+              Cash out
+            </button>
+          )}
+        </span>
+        <CardShare text={tweet} path={`/m/${key}?side=${p.side}`} target={target} />
+      </div>
     </li>
   );
 }
@@ -554,7 +589,7 @@ function ReferralPanel({ owner }: { owner: string }) {
     <section className="panel ref-panel" id="referrals">
       <h2 className="meta">
         <Anchor id="referrals" />
-        Your referral link
+        Your link
       </h2>
       <div className="ref-link">
         <span className="ref-url num">{link.replace("https://", "")}</span>
@@ -563,39 +598,46 @@ function ReferralPanel({ owner }: { owner: string }) {
         </button>
         <Flex target={siteShare(publicKey)} className="btn ghost small" label="Flex" />
       </div>
-      <p className="note">
-        Every share button on the site bakes this link in. When someone who arrived through it buys, their SOL enters through the r-fstacc stake
-        pool and the pool pays <b>half of its 0.1% deposit fee to you</b>, on-chain, on every buy they ever make here. It lands in your r-fstacc
-        account — the "loose change" above — and sweeps to SOL whenever you like.
-      </p>
       <div className="vc-nums ref-nums">
         <div className="vc-num">
           <span className="meta">wallets referred</span>
-          <strong className="display">{d ? d.referrals : stats.error ? "—" : "…"}</strong>
-          <span className="meta num">bought at least once through you</span>
+          <Flash watch={d?.referrals ?? null} className="display" as="strong">
+            {d ? d.referrals : stats.error ? "—" : "…"}
+          </Flash>
         </div>
         <div className="vc-num">
-          <span className="meta">SOL they put in</span>
-          <strong className="display">{d ? fmtAmount(BigInt(d.deposits), 9, 2) : "…"}</strong>
+          <span className="meta">SOL in</span>
+          <Flash watch={d?.deposits ?? null} className="display" as="strong">
+            {d ? fmtAmount(BigInt(d.deposits), 9, 2) : "…"}
+          </Flash>
           <span className="meta num">{d ? usd(px.lamportsUsd(BigInt(d.deposits))) : ""}</span>
         </div>
         <div className="vc-num">
           <span className="meta">you earned</span>
-          <strong className="display up">{d ? usd(px.quoteUsd(BigInt(d.earned))) : "…"}</strong>
-          <span className="meta num">{d ? `${fmtAmount(BigInt(d.earned), 9, 6)} r-fstacc · 0.05% of their buys` : ""}</span>
+          <Flash watch={d?.earned ?? null} className="display up" as="strong">
+            {d ? usd(px.quoteUsd(BigInt(d.earned))) : "…"}
+          </Flash>
+          <span className="meta num">{d ? `${fmtAmount(BigInt(d.earned), 9, 6)} r-fstacc` : ""}</span>
         </div>
       </div>
       {d && d.recent.length > 0 && (
         <ul className="ref-recent meta num">
           {d.recent.slice(0, 8).map((h) => (
             <li key={h.sig}>
-              <Link to={`/p/${h.funder}`}>{short(h.funder)}</Link> put in {fmtAmount(BigInt(h.lamports), 9, 3)} SOL → you got {usd(px.quoteUsd(BigInt(h.fee)))} · {ago(h.ts)}
+              <Link to={`/p/${h.funder}`}>{short(h.funder)}</Link> · {fmtAmount(BigInt(h.lamports), 9, 3)} SOL in → {usd(px.quoteUsd(BigInt(h.fee)))} to you · {ago(h.ts)}
             </li>
           ))}
         </ul>
       )}
-      {d && d.referrals === 0 && <p className="note">Nobody through your link yet. Flex a market; the chip is on every card.</p>}
-      {stats.error && !d && <p className="err">Couldn't read referral history right now.</p>}
+      {d && d.referrals === 0 && <p className="note">Nobody yet. Flex a market.</p>}
+      {stats.error && !d && <p className="err">Referral history unavailable.</p>}
+      <details className="bag-why">
+        <summary className="meta">how it pays</summary>
+        <p className="note">
+          Every share button bakes this link in. Buyers who arrive through it enter via the r-fstacc stake pool, which pays <b>half of its 0.1% deposit fee to you</b>,
+          on-chain, on every buy they ever make. Lands as loose change; sweeps to SOL whenever you like.
+        </p>
+      </details>
     </section>
   );
 }

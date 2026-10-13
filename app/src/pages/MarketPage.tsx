@@ -24,12 +24,15 @@ import { referralAccount } from "../lib/ref";
 import { confetti } from "../lib/confetti";
 import { currentShare, setHash, useQuery } from "../lib/url";
 import { OracleChart, OraclePrice, Tug } from "../components/bits";
+import { Delta, Flash, Sparkline } from "../components/Pulse";
+import { fetchViews } from "../lib/views";
 import { useToasts } from "../components/Toasts";
 import { ShareSheet, type ShareTarget } from "../components/ShareSheet";
+import { CardShare, Tweet } from "../components/Share";
 import { Feed, Leaders } from "../components/Live";
 import { BurnPanel } from "../components/Coin";
 import { DnWidget } from "../components/DnWidget";
-import { ago, amount as fmtAmount, lev, parseAmount, pct, price, usd, usdPrice } from "../lib/format";
+import { ago, amount as fmtAmount, lev, parseAmount, pct, usd, usdPrice } from "../lib/format";
 import { REDEEM_FEE, RFSTACC } from "../config";
 
 type Tab = "buy" | "sell" | "redeem";
@@ -45,8 +48,12 @@ export default function MarketPage() {
     }
   }, [key]);
   const { publicKey } = useWallet();
-  const view = usePoll(() => (marketKey ? loadMarketView(marketKey) : Promise.resolve(null)), [key]);
+  const view = usePoll(() => (marketKey ? loadMarketView(marketKey) : Promise.resolve(null)), [key], 6_000);
   const v = view.data;
+  // the rest of the board, for the switcher strip (edge snapshot, no extra RPC)
+  const others = usePoll(fetchViews, [], 30_000);
+  const feed = usePoll(() => fetchFeed(key), [key], 6_000);
+  const movesHour = (feed.data ?? []).filter((e) => e.ts >= Date.now() / 1000 - 3600).length;
   const bal = usePoll(
     () => (publicKey && v ? userBalances(publicKey, v) : Promise.resolve(null)),
     [publicKey?.toBase58(), v?.acct.key.toBase58(), view.data ? 1 : 0],
@@ -77,9 +84,12 @@ export default function MarketPage() {
     bal.refresh();
   };
   const ticker = under?.symbol ?? v.ticker;
+  const twapNow = v.oracle.twap ?? v.oracle.lastTwap;
+  const chg = v.oracle.lastTwap > 0 ? twapNow / v.oracle.lastTwap - 1 : 0;
+  const dir = chg > 1e-9 ? "up" : chg < -1e-9 ? "down" : "";
   const marketShare: ShareTarget = {
-    title: `$${ticker} ±100×`,
-    text: `$${ticker} at 100×, up or down. ${lev(v.side[0].leverage)} payout if it pumps, ${lev(v.side[1].leverage)} if it dumps. No liquidations. Somebody's wrong.`,
+    title: `$${ticker} · UP ${lev(v.side[0].leverage)} · DOWN ${lev(v.side[1].leverage)}`,
+    text: `$${ticker}: UP pays ${lev(v.side[0].leverage)}, DOWN pays ${lev(v.side[1].leverage)}. No liquidations. Somebody's wrong.`,
     url: currentShare(publicKey),
     image: `/api/og?m=${key}`,
     filename: `${ticker}-100x.png`,
@@ -114,13 +124,34 @@ export default function MarketPage() {
           </div>
         </div>
         <div className="px">
-          <div className="meta" title="TWAP: the time-weighted average price. Pots settle on this, not on spot, so nobody can flash-move it.">Price · {Math.round(v.acct.windowSecs / 60)}-min average</div>
-          <div className="big"><OraclePrice x={v.oracle.twap ?? v.oracle.lastTwap} quote={v.oracle.quote} ticker={ticker} /></div>
-          <div className="meta num">
-            {price(v.oracle.twap ?? v.oracle.lastTwap)} {v.oracle.quote} · observed {ago(v.oracle.updatedTs)}
+          <div className="meta" title="TWAP: the time-weighted average price. Pots settle on this, not on spot, so nobody can flash-move it.">
+            {Math.round(v.acct.windowSecs / 60)}-min TWAP · {movesHour ? <Flash watch={movesHour}>{movesHour} moves · 1h</Flash> : `observed ${ago(v.oracle.updatedTs)}`}
+          </div>
+          <Flash watch={twapNow} className={`big ${dir}`}>
+            <OraclePrice x={twapNow} quote={v.oracle.quote} ticker={ticker} />
+          </Flash>
+          <div className="meta num px-sub">
+            <Delta x={chg} dp={3} /> since last settle
+            <CardShare text={marketShare.text} path={`/m/${key}`} target={marketShare} className="card-share px-share" />
           </div>
         </div>
       </header>
+      {others.data && others.data.length > 1 && (
+        <nav className="switcher" aria-label="Other markets">
+          {others.data.map((o) => {
+            const k = o.acct.key.toBase58();
+            const t = o.oracle.twap ?? o.oracle.lastTwap;
+            const c = o.oracle.lastTwap > 0 ? t / o.oracle.lastTwap - 1 : 0;
+            return (
+              <Link key={k} to={`/m/${k}`} className={`sw-item ${k === key ? "on" : ""}`} aria-current={k === key ? "page" : undefined}>
+                <span className="display">${o.ticker}</span>
+                <Sparkline series={o.oracle.series} base={o.oracle.lastTwap} w={56} h={18} />
+                <Delta x={c} dp={2} />
+              </Link>
+            );
+          })}
+        </nav>
+      )}
       <div className="mkt-grid">
         <div className="col">
           <Primer ticker={ticker} />
@@ -128,55 +159,77 @@ export default function MarketPage() {
           <section className="panel dnw" id="dn">
             <h2 className="meta">
               <Anchor id="dn" />
-              Yield · the delta-neutral vault
+              Yield · delta-neutral
             </h2>
             <DnWidget market={v.acct.key} ticker={ticker} quote={v.oracle.quote} onDone={refresh} />
           </section>
-          <dl className="rules">
-            <div>
-              <dt>Every twitch</dt>
-              <dd>
-                Every time {v.ticker}'s price moves, the losing pot pays the winning pot. A 1% move hands over ~63% of the loser's pot; a 0.1%
-                move, ~10%. It can never hand over all of it — nobody gets liquidated, ever.
-                <small className="muted num">exact: 1 − 1.0001<sup>−100·|Δtick|</sup> of the loser's pot per move</small>
-              </dd>
-            </div>
-            <div>
-              <dt>Every transfer</dt>
-              <dd>Anyone's buy, sell or send pulls the trigger. No keeper, no funding, no 3am margin call.</dd>
-            </div>
-            <div>
-              <dt>Fees</dt>
-              <dd>
-                4% on trades, 4% on cash-outs. 60% back into the pots, 30% buys ${"100XBRO"} and burns it, 10% buys BABY100X and burns it. All on-chain, every time.
-              </dd>
-            </div>
-            <div>
-              <dt>Getting out</dt>
-              <dd>Sell into the curve, or cash out your slice of the pot minus {pct(REDEEM_FEE, 0)}. SOL in, SOL out. <b>The 0/20 rule:</b> 0% of your stake, 20% of your realized gain gets swapped to USDC and committed to the <a href={RAISE_URL} target="_blank" rel="noopener noreferrer">STACCIndex raise</a> in your name, same transaction. You hold the claim: $STACCS at close, or the USDC back if it misses.</dd>
-            </div>
-          </dl>
+          <details className="fine rules-fine">
+            <summary>the rules</summary>
+            <dl className="rules">
+              <div>
+                <dt>Every twitch</dt>
+                <dd>
+                  Loser's pot pays the winner. <span className="num">1% ≈ 63%</span> of it.
+                </dd>
+              </div>
+              <div>
+                <dt>Every transfer</dt>
+                <dd>Buy, sell or send settles it.</dd>
+              </div>
+              <div>
+                <dt>Fees</dt>
+                <dd>4% in, 4% out. 30% burns $100XBRO.</dd>
+              </div>
+              <div>
+                <dt>Out</dt>
+                <dd>
+                  Curve or pot, minus {pct(REDEEM_FEE, 0)}. 20% of gain backs the{" "}
+                  <a href={RAISE_URL} target="_blank" rel="noopener noreferrer">
+                    raise
+                  </a>
+                  .
+                </dd>
+              </div>
+            </dl>
+          </details>
         </div>
         <div className="col">
+          <OraclePanel v={v} ticker={ticker} />
           <section className="panel" id="live">
             <h2 className="meta">
               <Anchor id="live" />
               <span className="live-dot" aria-hidden />
               Live
+              <span className="right h2-share">
+                {movesHour ? <Flash watch={movesHour} className="num">{movesHour}/h</Flash> : null}
+                <Tweet
+                  text={
+                    movesHour
+                      ? `${movesHour} moves on $${ticker} this hour. UP pays ${lev(v.side[0].leverage)}, DOWN pays ${lev(v.side[1].leverage)}.`
+                      : `$${ticker} is quiet. UP pays ${lev(v.side[0].leverage)}, DOWN pays ${lev(v.side[1].leverage)}. First move wins.`
+                  }
+                  path={`/m/${key}`}
+                />
+              </span>
             </h2>
             <Feed market={v.acct.key.toBase58()} limit={10} />
           </section>
-          <OraclePanel v={v} />
-          <VaultPanel v={v} onDone={refresh} />
+          <VaultPanel v={v} onDone={refresh} ticker={ticker} />
           <section className="panel" id="leaders">
             <h2 className="meta">
               <Anchor id="leaders" />
-              Leaderboard
+              Biggest bags
+              <span className="right h2-share">
+                <Tweet
+                  text={`Biggest bags on $${ticker}: UP pays ${lev(v.side[0].leverage)}, DOWN pays ${lev(v.side[1].leverage)}. Come outsize them.`}
+                  path={`/m/${key}`}
+                />
+              </span>
             </h2>
             <Leaders market={v.acct.key.toBase58()} />
           </section>
           <BookPanel v={v} bal={bal.data ?? null} onShare={setShare} ticker={ticker} />
-          <KeeperPanel v={v} onDone={refresh} />
+          <KeeperPanel v={v} onDone={refresh} ticker={ticker} />
           <BurnPanel />
         </div>
       </div>
@@ -358,11 +411,11 @@ function Ticket({
           <button key={i} className={`side ${i === 0 ? "u" : "d"}`} aria-pressed={side === i} onClick={() => setSide(i)}>
             <span className="meta">{v.side[i].symbol || SIDE[i]}</span>
             <span className="display">
-              {i === 0 ? "Up" : "Down"} 100×<small className="ls">{i === 0 ? "long" : "short"}</small>
+              {i === 0 ? "Up" : "Down"} <Flash watch={v.side[i].leverage} as="b" className="num">{lev(v.side[i].leverage)}</Flash>
+              <small className="ls">{i === 0 ? "long" : "short"}</small>
             </span>
-            <span className="lev">
-              {usdPrice(px.priceUsd(v.side[i].curvePrice))} · {lev(v.side[i].leverage)} leverage
-            </span>
+            <span className="lev num">if right · {usdPrice(px.priceUsd(v.side[i].curvePrice))}</span>
+            {Number.isFinite(v.side[i].leverage) && v.side[i].leverage > v.side[1 - i].leverage && <span className="sticker">empty side · the trade</span>}
           </button>
         ))}
       </div>
@@ -370,16 +423,12 @@ function Ticket({
         <div className="tabs" role="tablist">
           {(["buy", "sell", "redeem"] as Tab[]).map((t) => (
             <button key={t} role="tab" aria-selected={tab === t} onClick={() => setTab(t)}>
-              {t === "redeem" ? "Cash out" : t === "buy" ? "Buy" : "Sell"}
+              {t === "redeem" ? "Cash out" : t === "buy" ? "Ape" : "Sell"}
             </button>
           ))}
         </div>
         <p className="tab-help">
-          {tab === "buy"
-            ? `SOL in, ${s.symbol} out. Those tokens are your slice of the ${SIDE[side]} pot.`
-            : tab === "sell"
-              ? "Sell your tokens back for SOL. We route to whichever pays more, the curve or the pot."
-              : "Burn your tokens for your slice of the pot, paid in SOL, minus 4%."}
+          {tab === "buy" ? `SOL in → ${SIDE[side]} pot slice.` : tab === "sell" ? "Curve or pot, whichever pays." : "Your pot slice, minus 4%."}
         </p>
         <div className="field">
           <label htmlFor="amt">
@@ -454,28 +503,28 @@ function Ticket({
           )}
           <div className="panel-row">
             <span className="muted">
-              Leverage right now <span className="num">(their pot ÷ your pot × 100)</span>
+              Payout now <span className="num">(their pot ÷ yours × 100)</span>
             </span>
-            <span className={`num ${side === 0 ? "up" : "down"}`}>{Number.isNaN(s.leverage) ? "— pots empty" : lev(s.leverage)}</span>
+            <Flash watch={s.leverage} className={`num ${side === 0 ? "up" : "down"}`}>
+              {Number.isNaN(s.leverage) ? "— pots empty" : lev(s.leverage)}
+            </Flash>
           </div>
           {Number.isFinite(s.leverage) && s.leverage > 0 && (
             <div className="panel-row">
-              <span className="muted">A 0.1% move in {v.ticker}</span>
+              <span className="muted">A 0.1% move</span>
               <span className="num">
-                <span className="up">+{pct(Math.min(((1 - Math.pow(1.0001, -1000)) * s.leverage) / 100, 99), 0)}</span> for you if it goes your way ·{" "}
-                <span className="down">−9.5%</span> if not
+                <span className="up">+{pct(Math.min(((1 - Math.pow(1.0001, -1000)) * s.leverage) / 100, 99), 0)}</span> your way · <span className="down">−9.5%</span> not
               </span>
             </div>
           )}
           {tab === "buy" && s.owed > 0.01 && (
             <p className="warn" role="note">
-              Heads up: {SIDE[side]} still owes <b className="num">{pct(s.owed, 0)}</b> of its curve price to {SIDE[1 - side]}. The next trade above the floor collects
-              it, so a fresh buy's curve value drops right after you buy. Trust the pot numbers below, not the token price.
+              {SIDE[side]} owes <b className="num">{pct(s.owed, 0)}</b> to {SIDE[1 - side]}. Next trade collects it.
             </p>
           )}
           {tab === "buy" && quote && pool && (
             <div className="whatif" aria-label="What happens to your money">
-              <span className="meta">If {v.ticker} moves in the next hour, your slice of the pot cashes out for…</span>
+              <span className="meta">If ${v.ticker} moves 1%…</span>
               <div className="cells">
                 {[-0.01, 0, 0.01].map((m) => {
                   const lam = whatIf(v, side, quote.out, side === 0 ? m : -m, pool);
@@ -490,8 +539,7 @@ function Ticket({
               </div>
               {quote.back !== undefined && (
                 <span className="meta">
-                  Or sell straight back right now for ≈ <b className="num">{fmtAmount(withdrawOut(pool, quote.back), 9, 4)} SOL</b>, whichever of curve or pot
-                  pays more. The flat number above is the pot alone.
+                  Sell back now ≈ <b className="num">{fmtAmount(withdrawOut(pool, quote.back), 9, 4)} SOL</b>
                 </span>
               )}
             </div>
@@ -509,11 +557,11 @@ function Ticket({
             </div>
           )}
         </div>
-        <button className={`btn big ${side === 0 ? "up" : "down"}`} disabled={disabled} data-loading={busy} onClick={submit}>
+        <button className={`btn big lfg ${side === 0 ? "up" : "down"}`} disabled={disabled} data-loading={busy} onClick={submit}>
           {!publicKey
-            ? "Connect a wallet. Then pick a side."
+            ? "Connect or grab a burner ↗"
             : tab === "buy"
-              ? `Buy ${SIDE[side]} 100×`
+              ? `Ape ${SIDE[side]} ${lev(s.leverage)} · LFG`
               : tab === "sell"
                 ? `Sell ${SIDE[side]}`
                 : `Cash out ${SIDE[side]}`}
@@ -523,37 +571,42 @@ function Ticket({
   );
 }
 
-function OraclePanel({ v }: { v: MarketView }) {
+function OraclePanel({ v, ticker }: { v: MarketView; ticker: string }) {
   const px = usePrices();
   const now = v.oracle.twap ?? v.oracle.lastTwap;
   const chg = now / v.oracle.lastTwap - 1;
   const loser = v.pending ? SIDE[v.pending.payer] : null;
+  const mins = Math.round(v.acct.windowSecs / 60);
+  const pctChg = (chg * 100).toFixed(3);
   return (
-    <section className="panel oracle" id="oracle">
-      <h2 className="meta">
+    <section className={`panel oracle ${chg > 1e-9 ? "up" : chg < -1e-9 ? "down" : ""}`} id="oracle">
+      <h2 className="meta" title={`${v.ticker}/${v.oracle.quote} · Raydium · ${mins}-min TWAP`}>
         <Anchor id="oracle" />
-        Oracle · {v.ticker}/{v.oracle.quote} on Raydium · {Math.round(v.acct.windowSecs / 60)}-min TWAP</h2>
+        {mins}-min TWAP
+        <span className="right h2-share">
+          <Delta x={chg} dp={3} />
+          <Tweet
+            text={`$${ticker} ${chg >= 0 ? "+" : ""}${pctChg}% since last settle · UP pays ${lev(v.side[0].leverage)}, DOWN pays ${lev(v.side[1].leverage)}`}
+            path={`/m/${v.acct.key.toBase58()}`}
+          />
+        </span>
+      </h2>
       <OracleChart series={v.oracle.series} twap={v.oracle.twap} lastTwap={v.oracle.lastTwap} fmt={(p) => px.oracleFmt(p, v.oracle.quote, v.ticker)} />
       <div className="legend">
         <span>
-          <i className="sw spot" /> spot
+          <i className="sw twap" /> now <Flash watch={now} as="b" className="num">{px.oracleFmt(now, v.oracle.quote, v.ticker)}</Flash>
         </span>
         <span>
-          <i className="sw twap" /> TWAP now <b className="num">{px.oracleFmt(now, v.oracle.quote, v.ticker)}</b>
-        </span>
-        <span>
-          <i className="sw ref" /> at last rebalance <b className="num">{px.oracleFmt(v.oracle.lastTwap, v.oracle.quote, v.ticker)}</b>
+          <i className="sw ref" /> last settle <b className="num">{px.oracleFmt(v.oracle.lastTwap, v.oracle.quote, v.ticker)}</b>
         </span>
       </div>
       <p className="story">
         {Math.abs(chg) < 5e-6 ? (
-          <>Hasn't twitched since last time. Nobody owes anybody. Boring. Fix that.</>
+          <>Flat since last settle. Fix that.</>
         ) : (
           <>
-            {v.ticker} twitched <b className={`num ${chg > 0 ? "up" : "down"}`}>{chg > 0 ? "+" : ""}{(chg * 100).toFixed(3)}%</b> since last
-            time. At 100× that's <span className={loser === "UP" ? "up" : "down"}>{loser}</span> owing{" "}
-            <b className="num">{v.pending ? pct(1 - v.pending.keep, 1) : "—"}</b> of its pot
-            {v.pending ? <> — <b className="num">{usd(px.quoteUsd(v.pending.amount))}</b> leaves on the next transfer</> : null}.
+            <span className={loser === "UP" ? "up" : "down"}>{loser}</span> owes <b className="num">{v.pending ? pct(1 - v.pending.keep, 1) : "—"}</b> of its pot
+            {v.pending ? <> · <Flash watch={v.pending.amount.toString()} as="b" className="num">{usd(px.quoteUsd(v.pending.amount))}</Flash> moves on the next tx</> : null}.
           </>
         )}
       </p>
@@ -561,7 +614,7 @@ function OraclePanel({ v }: { v: MarketView }) {
   );
 }
 
-function VaultPanel({ v, onDone }: { v: MarketView; onDone: () => void }) {
+function VaultPanel({ v, onDone, ticker }: { v: MarketView; onDone: () => void; ticker: string }) {
   const send = useSend();
   const px = usePrices();
   const [busy, setBusy] = useState<string | null>(null);
@@ -574,9 +627,15 @@ function VaultPanel({ v, onDone }: { v: MarketView; onDone: () => void }) {
   };
   return (
     <section className="panel" id="vaults">
-      <h2 className="meta">
+      <h2 className="meta" title={`${px.sol(total, 3)} across both pots`}>
         <Anchor id="vaults" />
-        Pots · {usd(px.quoteUsd(total))} <span className="num">· {px.sol(total, 3)}</span>
+        Pots · <Flash watch={total.toString()} className="num">{usd(px.quoteUsd(total))}</Flash>
+        <span className="right h2-share">
+          <Tweet
+            text={`$${ticker} pots: ${usd(px.quoteUsd(total))} on the table. UP ${usd(px.quoteUsd(v.side[0].vault))} vs DOWN ${usd(px.quoteUsd(v.side[1].vault))}. Somebody's wrong.`}
+            path={`/m/${v.acct.key.toBase58()}`}
+          />
+        </span>
       </h2>
       <Tug up={v.side[0].vault} down={v.side[1].vault} levUp={v.side[0].leverage} levDown={v.side[1].leverage} size="lg" />
       <div className="vtable" role="table" aria-label="Vaults">
@@ -607,11 +666,10 @@ function VaultPanel({ v, onDone }: { v: MarketView; onDone: () => void }) {
         <p>
           {unclaimed > 0n ? (
             <>
-              <b className="num">{usd(px.quoteUsd(unclaimed))}</b> in tips is sitting in the curves. Every trade here sweeps its
-              side; anyone can sweep both.
+              <b className="num">{usd(px.quoteUsd(unclaimed))}</b> in tips, unswept. Anyone can sweep.
             </>
           ) : (
-            "Tips swept. The pots have everything."
+            "Tips swept. Pots have everything."
           )}
         </p>
         <button
@@ -629,10 +687,10 @@ function VaultPanel({ v, onDone }: { v: MarketView; onDone: () => void }) {
             <>
               <span className={v.pending.payer === 0 ? "up" : "down"}>{SIDE[v.pending.payer]}</span> owes{" "}
               <span className={v.pending.payer === 0 ? "down" : "up"}>{SIDE[1 - v.pending.payer]}</span>{" "}
-              <b className="num">{usd(px.quoteUsd(v.pending.amount))}</b>. Any transfer collects it.
+              <b className="num">{usd(px.quoteUsd(v.pending.amount))}</b>. Any transfer collects.
             </>
           ) : (
-            "Pots are square with the oracle."
+            "Pots are square."
           )}
         </p>
         <button
@@ -668,43 +726,48 @@ function BookPanel({
     const s = v.side[i];
     const units = Number(amt) / 10 ** s.decimals;
     return {
-      title: `${SIDE[i]} 100× on $${ticker}`,
-      text: `I'm ${SIDE[i]} 100× on $${ticker}. ${lev(s.leverage)} payout if it ${i === 0 ? "pumps" : "dumps"}, ${usd(px.priceUsd(units * s.curvePrice))} on the line, zero chance of liquidation. Come take it.`,
+      title: `${SIDE[i]} ${lev(s.leverage)} on $${ticker}`,
+      text: `I'm ${SIDE[i]} on $${ticker}. ${lev(s.leverage)} payout if it ${i === 0 ? "pumps" : "dumps"}, ${usd(px.priceUsd(units * s.curvePrice))} on the line, zero chance of liquidation. Come take it.`,
       url: currentShare(publicKey).replace(/([?&])side=\d/, `$1side=${i}`),
       image: `/api/og?m=${key}&side=${i}&owner=${owner}`,
       filename: `${ticker}-${SIDE[i]}-100x.png`,
     };
-  };
-  const portfolioShare: ShareTarget = {
-    title: "My 100× bag",
-    text: "My ±100× bag on 100x.broker. Up or down, no liquidations, somebody's paying me.",
-    url: currentShare(publicKey),
-    image: `/api/og?owner=${owner}`,
-    filename: "100x-book.png",
   };
   const rows = [
     { i: 0 as const, amt: bal?.up ?? 0n },
     { i: 1 as const, amt: bal?.down ?? 0n },
   ];
   const any = rows.some((r) => r.amt > 0n);
+  // the side this wallet actually holds (the bigger one in USD when both); the share is that side's real payout
+  const held = rows
+    .filter((r) => r.amt > 0n)
+    .sort((a, b) => (Number(b.amt) / 10 ** v.side[b.i].decimals) * v.side[b.i].curvePrice - (Number(a.amt) / 10 ** v.side[a.i].decimals) * v.side[a.i].curvePrice)[0];
+  const portfolioShare: ShareTarget = {
+    title: `My bag on $${ticker}`,
+    text: held
+      ? `My bag on $${ticker}: ${SIDE[held.i]} pays ${lev(v.side[held.i].leverage)}. No liquidations, somebody's paying me.`
+      : `My bag on 100x.broker. $${ticker}: UP pays ${lev(v.side[0].leverage)}, DOWN pays ${lev(v.side[1].leverage)}. No liquidations.`,
+    url: currentShare(publicKey),
+    image: `/api/og?owner=${owner}`,
+    filename: "100x-book.png",
+  };
+  const headShare = held ? positionShare(held.i, held.amt) : portfolioShare;
   return (
     <section className="panel" id="book">
       <h2 className="meta">
         <Anchor id="book" />
-        Your book
+        Your bag
         <span className="right h2-actions">
           <Link className="btn ghost small" to="/me">
             Full bag →
           </Link>
-          <button className="btn ghost small" onClick={() => onShare(portfolioShare)}>
-            Flex bag
-          </button>
+          {bal && <CardShare text={headShare.text} path={held ? `/m/${key}?side=${held.i}` : `/m/${key}`} target={headShare} />}
         </span>
       </h2>
       {!bal ? (
         <span className="skeleton" style={{ height: 48 }} />
       ) : !any ? (
-        <p className="note">You're a spectator. Pick a side.</p>
+        <p className="note">Spectating. Pick a side.</p>
       ) : (
         rows
           .filter((r) => r.amt > 0n)
@@ -723,7 +786,7 @@ function BookPanel({
                 </span>
                 <span className="num">
                   {s.atFloor ? "nothing" : usd(px.priceUsd(Math.min(units * s.curvePrice, Number(s.reserve) / 1e9)))} at curve ·{" "}
-                  {usd(px.priceUsd(units * s.nav * (1 - REDEEM_FEE)))} if you cash out
+                  {usd(px.priceUsd(units * s.nav * (1 - REDEEM_FEE)))} at pot
                 </span>
               </div>
             );
@@ -737,7 +800,7 @@ function BookPanel({
   );
 }
 
-function KeeperPanel({ v, onDone }: { v: MarketView; onDone: () => void }) {
+function KeeperPanel({ v, onDone, ticker }: { v: MarketView; onDone: () => void; ticker: string }) {
   const send = useSend();
   const [busy, setBusy] = useState<string | null>(null);
   const [donate, setDonate] = useState("");
@@ -748,21 +811,32 @@ function KeeperPanel({ v, onDone }: { v: MarketView; onDone: () => void }) {
     if (await send(label, build)) onDone();
     setBusy(null);
   };
+  const key = v.acct.key.toBase58();
+  // the side most in the hole, if any: the real chore on offer
+  const debtor = ([0, 1] as const).filter((i) => v.side[i].owed > 1e-6).sort((a, b) => v.side[b].owed - v.side[a].owed)[0];
   return (
     <details className="panel keep" id="keep">
-      <summary className="meta">
+      <summary className="meta" title="Optional, for keepers. Anyone can, nobody's paid, everybody wins.">
         <Anchor id="keep" />
-        Chores · optional, for keepers. Anyone can, nobody's paid, everybody wins
+        Chores
+        <span className="right h2-share">
+          <Tweet
+            text={
+              debtor !== undefined
+                ? `${SIDE[debtor]} owes ${pct(v.side[debtor].owed, 2)} on $${ticker}. Anyone can collect it.`
+                : `$${ticker} pots are square. Tip them, deepen the game.`
+            }
+            path={debtor !== undefined ? `/m/${key}?side=${debtor}` : `/m/${key}`}
+          />
+        </span>
       </summary>
       <div className="actions">
         {([0, 1] as const).map((i) => (
           <div className="action" key={`s${i}`}>
             <p>
-              <span className={i === 0 ? "up" : "down"}>{SIDE[i]}</span> curve is{" "}
+              <span className={i === 0 ? "up" : "down"}>{SIDE[i]}</span> curve{" "}
               <b className="num">{v.side[i].owed > 1e-6 ? `${pct(v.side[i].owed, 2)} in the hole` : "square"}</b>.{" "}
-              {v.side[i].owed > 1e-6 && v.side[i].atFloor
-                ? `It's been drained to its launch price — the debt gets collected the second ${SIDE[i]} trades above the floor.`
-                : `Collecting mints ${SIDE[i]} and sells it into its own curve; the proceeds land in the ${SIDE[1 - i]} pot.`}
+              {v.side[i].owed > 1e-6 && v.side[i].atFloor ? `Collects once ${SIDE[i]} trades above floor.` : `Proceeds land in ${SIDE[1 - i]}'s pot.`}
             </p>
             <button
               className="btn ghost small"
@@ -776,7 +850,7 @@ function KeeperPanel({ v, onDone }: { v: MarketView; onDone: () => void }) {
         ))}
         <div className="action">
           <div className="field">
-            <p>Tip the pots. SOL, split evenly, you get nothing back except a deeper game.</p>
+            <p>Tip the pots. SOL, split evenly.</p>
             <div className="input text">
               <input
                 inputMode="decimal"
@@ -879,20 +953,12 @@ function Primer({ ticker }: { ticker: string }) {
   };
   return (
     <aside className="primer" aria-label="How this works">
-      <strong>New here? The 20-second version.</strong>
       <p className="pitch">
-        You long ${ticker}? Long it. Short? Short it. Don't want to be long or short but think it's gonna be a wild ride?{" "}
-        <a href="#dn">Park it in the vault.</a>
+        <b className="up">UP</b> if ${ticker} pumps. <b className="down">DOWN</b> if it dumps. Wrong side pays the right. No liquidations, leave anytime. No opinion?{" "}
+        <a href="#dn">Park it.</a>
       </p>
-      <ol>
-        <li>
-          Pick <b className="up">UP</b> if you think ${ticker} goes up in the next hour, <b className="down">DOWN</b> if down.
-        </li>
-        <li>Pay SOL, get tokens. Your tokens are your slice of your side's pot.</li>
-        <li>Every move in ${ticker}'s price, the losing pot pays the winning pot. Sell or cash out whenever. Nobody gets liquidated.</li>
-      </ol>
       <button className="linkish" onClick={hide}>
-        got it, hide this →
+        got it →
       </button>
     </aside>
   );

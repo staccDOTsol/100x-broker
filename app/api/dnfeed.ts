@@ -3,6 +3,8 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { Connection, PublicKey, type ParsedInstruction, type ParsedTransactionWithMeta, type PartiallyDecodedInstruction } from "@solana/web3.js";
 import bs58 from "bs58";
+import { memo } from "./_lib/memo.js";
+import { parsedTxs, recentSigs } from "./_lib/txcache.js";
 
 const DN_PROGRAM = "2ZbjE44nSh3AmpREg4sdNMViBLAzAEtFKYDn1XdqMzEj";
 const VAULT_LEN = 488;
@@ -83,18 +85,26 @@ export function classify(tx: ParsedTransactionWithMeta, shareMint: string): DnEv
   return null;
 }
 
-export async function vaultFeed(vault: PublicKey, limit = 60): Promise<DnEv[]> {
-  const c = conn();
-  const [info, sigs] = await Promise.all([c.getAccountInfo(vault), c.getSignaturesForAddress(vault, { limit })]);
-  if (!info || info.data.length !== VAULT_LEN || info.owner.toBase58() !== DN_PROGRAM) throw new Error("not a vault");
-  const shareMint = new PublicKey(info.data.subarray(136, 168)).toBase58();
-  const ok = sigs.filter((s) => !s.err).map((s) => s.signature);
-  const txs = await c.getParsedTransactions(ok, { maxSupportedTransactionVersion: 0 });
-  return txs
-    .map((t) => (t ? classify(t, shareMint) : null))
-    .filter((e): e is DnEv => !!e)
-    .sort((a, b) => b.ts - a.ts);
-}
+/** A vault's share mint never changes: read once per instance (a day). */
+const shareMintOf = (c: Connection, vault: PublicKey) =>
+  memo(`dnfeed:mint:${vault.toBase58()}`, 86_400_000, 86_400_000, async () => {
+    const info = await c.getAccountInfo(vault);
+    if (!info || info.data.length !== VAULT_LEN || info.owner.toBase58() !== DN_PROGRAM) throw new Error("not a vault");
+    return new PublicKey(info.data.subarray(136, 168)).toBase58();
+  });
+
+/** 5 s fresh, a minute stale; only signatures newer than the last refresh are fetched and only unseen transactions parsed. */
+export const vaultFeed = (vault: PublicKey, limit = 60): Promise<DnEv[]> =>
+  memo(`dnfeed:${vault.toBase58()}:${limit}`, 5_000, 60_000, async () => {
+    const c = conn();
+    const [shareMint, sigs] = await Promise.all([shareMintOf(c, vault), recentSigs(c, vault, limit)]);
+    const ok = sigs.filter((s) => !s.err).map((s) => s.signature);
+    const txs = await parsedTxs(c, ok);
+    return txs
+      .map((t) => (t ? classify(t, shareMint) : null))
+      .filter((e): e is DnEv => !!e)
+      .sort((a, b) => b.ts - a.ts);
+  });
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {

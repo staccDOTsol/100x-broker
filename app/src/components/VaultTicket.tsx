@@ -173,12 +173,14 @@ export function VaultTicket({ view, ticker, onDone, className = "" }: { view: Va
           <button className="btn big" disabled={!canPark} data-loading={busy} onClick={parkDeploy}>
             {publicKey ? "Park & deploy — 1 click" : "Connect to park"}
           </button>
-          <p className="note">
-            One wallet prompt, up to three transactions: park, swap half to {ticker} + buy the DOWN hedge, add the liquidity. You act as the keeper for your own
-            deposit and pocket its {v.keeperBps / 100}% bounty. Your wallet may flag steps 2–3 as "may fail" while it previews them — they depend on step 1 landing first.
+          <p
+            className="note num"
+            title={`One prompt, up to three transactions: park, swap half to ${ticker} + buy the DOWN hedge, add liquidity. You keep the ${v.keeperBps / 100}% keeper bounty. Steps 2–3 may preview as "may fail" until step 1 lands.`}
+          >
+            1 prompt · 3 tx · you keep {v.keeperBps / 100}%
           </p>
           <button className="linkish" disabled={!canPark} onClick={parkOnly}>
-            or just park it and let the keeper deploy later →
+            just park · keeper deploys →
           </button>
         </>
       ) : (
@@ -194,15 +196,17 @@ export function VaultTicket({ view, ticker, onDone, className = "" }: { view: Va
           <button className="btn big" disabled={!canUnpark} data-loading={busy} onClick={unparkSol}>
             {publicKey ? `Unpark ${part}% to SOL — 1 click` : "Connect to unpark"}
           </button>
-          <p className="note">
-            One prompt, two transactions: your slice comes out in kind (SOL, {ticker}, the LP, the DOWN hedge), then the second sells the {ticker} back
-            into the pool, exits the DOWN at the better of curve or pot, and unstakes the rest — SOL only, nothing left behind but dust.
+          <p
+            className="note num"
+            title={`One prompt, two transactions: your slice comes out in kind (SOL, ${ticker}, LP, DOWN hedge), then the second sells the ${ticker} back, exits the DOWN at the better of curve or pot, and unstakes the rest. SOL only.`}
+          >
+            1 prompt · 2 tx · SOL out
           </p>
           <button className="linkish" disabled={!canUnpark} onClick={unparkKind}>
-            or take it in kind (keep the {ticker} and the DOWN) →
+            take in kind · keep {ticker} + DOWN →
           </button>
           <button className="linkish" disabled={!publicKey || busy} onClick={finishLeftovers}>
-            {failed ? "finish it: turn the leftovers in your wallet into SOL →" : `holding ${ticker} / DOWN / WSOL from an unpark? turn them into SOL →`}
+            {failed ? "finish · leftovers → SOL →" : `leftovers → SOL →`}
           </button>
         </>
       )}

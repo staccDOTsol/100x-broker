@@ -8,11 +8,12 @@ import { createMarketIx, cu, marketPda, sideAccounts, type MarketKeys } from "..
 import { marketCurve } from "../lib/curve";
 import { humanError } from "../hooks";
 import { useToasts } from "../components/Toasts";
-import { ago, short } from "../lib/format";
+import { CardShare } from "../components/Share";
+import { ago, lev, pct, short } from "../lib/format";
 import { getDerivedMeta, getUnderlying, metaUri, type DerivedMeta, type Underlying } from "../lib/das";
 import { shareUrl, tweetUrl } from "../lib/ref";
 import { currentShare, useQuery } from "../lib/url";
-import { DEFAULT_WINDOW_SECS, PROGRAM_ID, RAYDIUM_CLMM, RFSTACC } from "../config";
+import { DEFAULT_WINDOW_SECS, LEVERAGE, PROGRAM_ID, RAYDIUM_CLMM, REDEEM_FEE, RFSTACC } from "../config";
 
 type PoolRow = {
   id: PublicKey;
@@ -25,13 +26,16 @@ type PoolRow = {
   health: OracleHealth | null;
 };
 type StepState = "idle" | "active" | "done" | "failed";
-const STEPS = ["Curve config · hook = 100x, partner = market", "UP curve + mint", "DOWN curve + mint", "Market, vaults, hook accounts"];
+// Same four on-chain steps, same order; labels are display-only.
+const STEPS = ["Curve config", "UP curve", "DOWN curve", "Market + vaults"];
 const WINDOWS = [
-  { secs: 900, label: "15 min", note: "reacts fast · easier to push" },
-  { secs: DEFAULT_WINDOW_SECS, label: "66 min", note: "house default" },
-  { secs: 14_400, label: "4 h", note: "calm · slow to react" },
+  { secs: 900, label: "15 min", note: "fast" },
+  { secs: DEFAULT_WINDOW_SECS, label: "66 min", note: "default" },
+  { secs: 14_400, label: "4 h", note: "calm" },
 ];
 const EST_RENT_SOL = 0.04;
+/** Mirrors `marketCurve()` in lib/curve.ts (startingFeeBps = endingFeeBps = 400). */
+const CURVE_FEE_BPS = 400;
 
 /** Raydium v3: CLMM pools containing this mint, deepest first. Filtered to SOL/USDC/USDT quotes. */
 async function raydiumPools(mint: PublicKey): Promise<Omit<PoolRow, "obs" | "health">[]> {
@@ -124,6 +128,7 @@ export default function NewMarket() {
   const [steps, setSteps] = useState<StepState[]>(STEPS.map(() => "idle"));
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [listed, setListed] = useState<{ symbol: string; key: string } | null>(null);
 
   // 1. resolve the pasted address -> underlying + candidate pools (+ oracle health per pool)
   useEffect(() => {
@@ -272,9 +277,9 @@ export default function NewMarket() {
         /* ignore */
       }
       const url = shareUrl(`/m/${keys.key.toBase58()}`, payer);
-      toasts.push({ s: "ok", title: `$${under?.symbol} ±100× is live. You cooked.`, body: "Your wallet is the referrer on this link." });
+      toasts.push({ s: "ok", title: `$${under?.symbol} is live.`, body: "You're the referrer on this link." });
       window.open(tweetUrl(`I just cooked $${under?.symbol} at ±100×. Up or down, no liquidations. Pick a side before someone picks it for you.`, url), "_blank", "noopener");
-      nav(`/m/${keys.key.toBase58()}`);
+      setListed({ symbol: under?.symbol ?? "TOKEN", key: keys.key.toBase58() });
     } catch (e) {
       setErr(humanError(e));
       setSteps((xs) => xs.map((x) => (x === "active" ? "idle" : x)));
@@ -285,15 +290,17 @@ export default function NewMarket() {
 
   const resumed = steps.some((s) => s === "done") || !!kp?.resumed;
   const canCreate = !!publicKey && !!keys && !!meta && !busy && !!pool?.health?.ok;
+  const symbol = under?.symbol ?? "…";
+  const stepLabel = (s: StepState) => (s === "idle" ? "pending" : s);
   return (
     <>
       <header className="mkt-head">
         <div>
           <div className="meta">
-            <Link to="/">Board</Link> / list a market
+            <Link to="/">Board</Link> / list
           </div>
-          <h1 className="display">Cook up a ±100× pair</h1>
-          <p className="lede">Any coin with a Raydium CLMM pool. Paste the CA; we find the oracle, name the pair, you sign once. Yes, even that one.</p>
+          <h1 className="display">List a coin.</h1>
+          <p className="lede num nm-lede">Paste CA · pick oracle · sign once</p>
         </div>
         <div className="px">
           <button
@@ -302,7 +309,7 @@ export default function NewMarket() {
             disabled={!under}
             onClick={() => {
               navigator.clipboard?.writeText(currentShare(publicKey));
-              toasts.push({ s: "ok", title: "Recipe copied", body: "Coin, pool and window are in it — anyone can finish cooking this." });
+              toasts.push({ s: "ok", title: "Recipe copied", body: "Coin, pool, window. Anyone can finish it." });
             }}
           >
             Copy recipe
@@ -320,7 +327,7 @@ export default function NewMarket() {
             <div className="step-n">1</div>
             <div className="field">
               <label htmlFor="ca">
-                <span className="meta">The coin · paste a CA (or a Raydium CLMM pool)</span>
+                <span className="meta">Coin · CA or CLMM pool</span>
                 {resolving && <span className="meta">looking up…</span>}
               </label>
               <div className="input text" data-invalid={!!inputErr}>
@@ -348,9 +355,9 @@ export default function NewMarket() {
           <section className="step" aria-disabled={!pools.length}>
             <div className="step-n">2</div>
             <div className="field">
-              <span className="meta">The oracle · which Raydium pool calls the price</span>
+              <span className="meta">Oracle · Raydium pool</span>
               {!pools.length ? (
-                <p className="note">{under ? "No usable pool. Tragic." : "Pools show up once the coin resolves."}</p>
+                <p className="note">{under ? "No usable pool." : "Resolves after the coin."}</p>
               ) : (
                 <div className="pools" role="radiogroup" aria-label="Oracle pool">
                   {pools.map((p, i) => (
@@ -365,7 +372,7 @@ export default function NewMarket() {
                         q.set({ pool: p.id.toBase58() });
                       }}
                       disabled={!p.health?.ok}
-                      title={p.health?.ok ? undefined : "This pool hasn't recorded enough observations to be an oracle"}
+                      title={p.health?.ok ? undefined : "Too few observations to be an oracle"}
                     >
                       <span className="pool-pair">
                         {under?.symbol}/{p.quote}
@@ -374,7 +381,7 @@ export default function NewMarket() {
                       <span className="num">${p.tvl.toLocaleString("en-US", { maximumFractionDigits: 0 })} TVL</span>
                       <span className="num">${p.volume24h.toLocaleString("en-US", { maximumFractionDigits: 0 })} / 24h</span>
                       <span className={`num ${p.health?.ok ? "" : "down"}`}>
-                        {p.health ? `${p.health.observations} obs · last ${ago(Math.floor(Date.now() / 1000) - p.health.lastAgeSecs)}` : "no observations"}
+                        {p.health ? `${p.health.observations} obs · ${ago(Math.floor(Date.now() / 1000) - p.health.lastAgeSecs)}` : "no observations"}
                       </span>
                     </button>
                   ))}
@@ -386,7 +393,7 @@ export default function NewMarket() {
           <section className="step" aria-disabled={!pool}>
             <div className="step-n">3</div>
             <div className="field">
-              <span className="meta">The window · how much history each twitch averages</span>
+              <span className="meta">Window · price averaging</span>
               <div className="chips">
                 {WINDOWS.map((w) => (
                   <button
@@ -420,61 +427,105 @@ export default function NewMarket() {
                   </span>
                 </span>
               </div>
-              <p className="note">
-Shorter tracks the coin faster but one fat trade can lean on it. Longer is calmer. Either way only stored observations count —
-                nobody flashloans this in the same block.
-              </p>
             </div>
           </section>
 
           {existing.length > 0 && (
             <div className="callout">
-              This oracle already has {existing.length === 1 ? "a market" : `${existing.length} markets`}:{" "}
+              {existing.length === 1 ? "1 market" : `${existing.length} markets`} on this oracle:{" "}
               {existing.map((k) => (
                 <Link key={k.toBase58()} to={`/m/${k.toBase58()}`} className="addr">
                   {short(k.toBase58())}
                 </Link>
               ))}
-              . Listing another with a different window is allowed; the same window would be a duplicate.
+              <span className="muted"> · new window ok · same window = duplicate</span>
             </div>
           )}
           {err && <p className="err">{err}</p>}
-          <button className="btn big" type="submit" disabled={!canCreate} data-loading={busy}>
-            {!publicKey ? "Connect a wallet to cook" : resumed && !busy ? "Finish cooking" : `Cook $${under?.symbol ?? "…"} ±100×`}
-          </button>
-          <p className="note">
-            ≈{EST_RENT_SOL} SOL in account rent · 4 transactions, one approval · names, symbols and images come from the token's own
-            metadata. The market address commits to the mints, oracle and window.
+
+          {listed ? (
+            <div className="card nm-done" data-live>
+              <div className="card-head">
+                <span className="card-ticker">
+                  {under?.image && <img className="tokimg" src={under.image} alt="" />}${listed.symbol}
+                </span>
+                <span className="chip nm-live">live</span>
+                <CardShare text={`Just listed $${listed.symbol} on 100x.broker · pick a side`} path={`/m/${listed.key}`} />
+              </div>
+              <div className="num muted">{short(listed.key)}</div>
+              <button type="button" className="btn big lfg" onClick={() => nav(`/m/${listed.key}`)}>
+                Open market →
+              </button>
+            </div>
+          ) : (
+            <button className="btn big lfg" type="submit" disabled={!canCreate} data-loading={busy}>
+              {!publicKey ? "Connect to list" : resumed && !busy ? "Finish listing" : `List $${symbol} · LFG`}
+            </button>
+          )}
+
+          <ol className="nm-progress" aria-label="Listing progress">
+            {STEPS.map((s, i) => (
+              <li key={s} className="chip nm-step" data-s={steps[i]}>
+                <span className="dot" aria-hidden />
+                {s}
+                <span className="sr-only"> — {stepLabel(steps[i])}</span>
+              </li>
+            ))}
+          </ol>
+          <p className="note num nm-fine">
+            ≈{EST_RENT_SOL} SOL rent · {STEPS.length} tx · 1 approval
           </p>
+
+          <details className="nm-details">
+            <summary className="meta">How it works</summary>
+            <div className="nm-details-body">
+              <p>Names, symbols, images: pulled from the token's own metadata.</p>
+              <p>Market address commits to the mints, oracle and window.</p>
+              <p>Window: shorter tracks faster but one fat trade can lean on it; longer is calmer. Only stored observations count — no same-block flashloans.</p>
+              <p>Keys stay in this browser until the market exists. Close the tab mid-listing; it resumes.</p>
+              <p>Same oracle, different window: allowed. Same window: duplicate.</p>
+            </div>
+          </details>
         </form>
 
         <aside className="col">
           <section className="panel">
-            <h2 className="meta">Your pair · meet the twins</h2>
+            <h2 className="meta">The pair</h2>
             <div className="pair-cards">
               {(["up", "down"] as const).map((sd) => (
                 <div className={`pair-card ${sd === "up" ? "u" : "d"}`} key={sd}>
                   {meta ? <img src={meta[sd].image} alt="" /> : <span className="skeleton img" />}
                   <div>
-                    <div className="display">{sd === "up" ? "Up" : "Down"} 100×</div>
+                    <div className="display">{sd === "up" ? "Up" : "Down"}</div>
+                    <div className="num nm-genesis">{lev(LEVERAGE)} at genesis</div>
                     <div className="num">{meta ? meta[sd].symbol : "—"}</div>
-                    <div className="muted">{meta ? meta[sd].name : under ? "cooking…" : "paste a CA first"}</div>
+                    <div className="muted">{meta ? meta[sd].name : under ? "naming…" : "paste a CA"}</div>
                   </div>
                 </div>
               ))}
             </div>
-            <div className="panel-row">
-              <span className="muted">Market address</span>
-              <span className="addr">{keys ? short(keys.key.toBase58()) : "—"}</span>
+            <div className="nm-stats">
+              <div className="panel stat-card nm-stat">
+                <span className="meta">Max lev</span>
+                <span className="display num">{lev(LEVERAGE)}</span>
+              </div>
+              <div className="panel stat-card nm-stat">
+                <span className="meta">Fee in</span>
+                <span className="display num">{pct(CURVE_FEE_BPS / 10_000, 0)}</span>
+              </div>
+              <div className="panel stat-card nm-stat">
+                <span className="meta">Fee out</span>
+                <span className="display num">{pct(REDEEM_FEE, 0)}</span>
+              </div>
             </div>
             <div className="panel-row">
-              <span className="muted">Leverage · curve fee · redeem fee</span>
-              <span className="num">100× · 4% · 4%</span>
+              <span className="muted">Market</span>
+              <span className="addr">{keys ? short(keys.key.toBase58()) : "—"}</span>
             </div>
           </section>
           {pool && (
             <section className="panel">
-              <h2 className="meta">Oracle health</h2>
+              <h2 className="meta">Oracle</h2>
               <div className="panel-row">
                 <span className="muted">Pool</span>
                 <span className="num">
@@ -482,40 +533,20 @@ Shorter tracks the coin faster but one fat trade can lean on it. Longer is calme
                 </span>
               </div>
               <div className="panel-row">
-                <span className="muted">Stored observations</span>
+                <span className="muted">Observations</span>
                 <span className="num">{pool.health?.observations ?? 0} / 100</span>
               </div>
               <div className="panel-row">
-                <span className="muted">Ring spans</span>
+                <span className="muted">Ring span</span>
                 <span className="num">{pool.health ? `${(pool.health.spanSecs / 60).toFixed(0)} min` : "—"}</span>
               </div>
               <div className="panel-row">
-                <span className="muted">Last observation</span>
+                <span className="muted">Last obs</span>
                 <span className="num">{pool.health && Number.isFinite(pool.health.lastAgeSecs) ? ago(Math.floor(Date.now() / 1000) - pool.health.lastAgeSecs) : "—"}</span>
               </div>
-              {pool.health && pool.health.spanSecs < windowSecs && (
-                <p className="note">
-                  The ring holds less history than your window right now; the market keeps its own checkpoints and the window fills in
-                  over time.
-                </p>
-              )}
+              {pool.health && pool.health.spanSecs < windowSecs && <p className="note">Ring shorter than window · fills in over time.</p>}
             </section>
           )}
-          <section className="panel">
-            <h2 className="meta">Steps</h2>
-            <ol className="steps">
-              {STEPS.map((s, i) => (
-                <li key={s} data-s={steps[i]}>
-                  <span className="dot" aria-hidden />
-                  <span>
-                    {s}
-                    <span className="sr-only"> — {steps[i]}</span>
-                  </span>
-                </li>
-              ))}
-            </ol>
-            <p className="note">Keys live in this browser until the market exists — close the tab mid-cook and it resumes where you left it.</p>
-          </section>
         </aside>
       </div>
     </>

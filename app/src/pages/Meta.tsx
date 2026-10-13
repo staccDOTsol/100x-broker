@@ -1,6 +1,6 @@
-// /meta — what's spicy right now (Decide): one list, one thesis per row, one button to press.
-// Rows come from src/meta.ts; the numbers come from the same loader the board uses for its rows.
-import { Link } from "react-router-dom";
+// /meta — what's spicy right now (Decide): one card per pick, real numbers only, one button each, share baked in.
+// Picks come from src/meta.ts; the numbers come from the same loader the board uses for its rows. Nothing here is simulated.
+import { Link, useNavigate } from "react-router-dom";
 import { PublicKey } from "@solana/web3.js";
 import { usePoll } from "../hooks";
 import { loadMarketView, type MarketView } from "../lib/chain";
@@ -8,6 +8,8 @@ import { fetchViews } from "../lib/views";
 import { META, type MetaPick } from "../meta";
 import { OraclePrice, Tug } from "../components/bits";
 import { bust, Flex, marketShare, useRefWallet } from "../components/Flex";
+import { CardShare } from "../components/Share";
+import { Delta, Flash, Sparkline } from "../components/Pulse";
 import type { ShareTarget } from "../components/ShareSheet";
 import { useUnderlying } from "../hooks/underlying";
 import { usePrices } from "../hooks/price";
@@ -15,7 +17,7 @@ import { shareUrl } from "../lib/ref";
 import { ago, lev, usdPrice } from "../lib/format";
 
 type Views = Record<string, MarketView | null>;
-/** Every pinned market, once, with the board's loader. A bad or dead key only blanks its own row. */
+/** Every pinned market, once, with the board's loader. A bad or dead key only blanks its own card. */
 async function loadPicks(): Promise<Views> {
   const keys = [...new Set(META.map((p) => p.market).filter(Boolean))];
   const snap = await fetchViews().catch(() => null);
@@ -39,22 +41,34 @@ async function loadPicks(): Promise<Views> {
 function listShare(wallet: PublicKey | null): ShareTarget {
   return {
     title: "What's spicy — 100x.broker",
-    text: "Markets the house is actually in, one button each. Long it, short it, or park in the vault and farm the chop. Not advice.",
+    text: "Markets the house is actually in, one button each. Not advice.",
     url: shareUrl("/meta", wallet),
     image: `/api/og?${bust()}`,
     filename: "spicy.png",
   };
 }
 
-type Action = { to: string; label: string; sub: string; cls: string };
-/** UP/DOWN preselect the side on the market page (?side=0|1); VAULT goes to the vault, or to the market's vault panel while it's being born. */
-function actionFor(p: MetaPick): Action | null {
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** The pick's headline cut to a ≤3-word label: first fragment before "·", minus a leading "$TICKER,". The full thesis rides as the tooltip. */
+function label(p: MetaPick): string {
+  const head = p.headline.split("·")[0].replace(new RegExp(`^\\$${escapeRe(p.ticker)}\\W*`, "i"), "").trim();
+  const words = head.split(/\s+/).filter(Boolean);
+  return words.slice(0, 3).join(" ") + (words.length > 3 ? "…" : "");
+}
+
+/** Where the one button goes. UP/DOWN preselect the side (?side=0|1); VAULT goes to the vault, or the market's vault panel while it's being born. */
+function actionPath(p: MetaPick): string | null {
   if (!p.market) return null;
-  if (p.side === "UP") return { to: `/m/${p.market}?side=0`, label: "UP 100×", sub: "long", cls: "up" };
-  if (p.side === "DOWN") return { to: `/m/${p.market}?side=1`, label: "DOWN 100×", sub: "short", cls: "down" };
-  return p.vault
-    ? { to: `/yield/${p.vault}`, label: "Park SOL", sub: "delta-neutral vault", cls: "" }
-    : { to: `/m/${p.market}#dn`, label: "vault spinning up", sub: "see the market's vault panel", cls: "ghost" };
+  if (p.side === "UP") return `/m/${p.market}?side=0`;
+  if (p.side === "DOWN") return `/m/${p.market}?side=1`;
+  return p.vault ? `/yield/${p.vault}` : `/m/${p.market}#dn`;
+}
+
+/** The tweet: real leverage when the view is here, the bare side otherwise. Never a made-up number. */
+function shareText(p: MetaPick, v: MarketView | null | undefined): string {
+  if (p.side === "VAULT") return `$${p.ticker} vault farms the chop on 100x.broker`;
+  const i = p.side === "UP" ? 0 : 1;
+  return v ? `$${p.ticker} ${p.side} pays ${lev(v.side[i].leverage)} right now on 100x.broker` : `$${p.ticker} ${p.side} on 100x.broker`;
 }
 
 export default function MetaPage() {
@@ -62,112 +76,135 @@ export default function MetaPage() {
   const refWallet = useRefWallet();
   return (
     <>
-      <header className="spicy-head">
+      <header className="spicy-head mc-head">
         <div className="meta">
           <Link to="/">Board</Link> / spicy
         </div>
-        <h1 className="display">What's spicy</h1>
-        <p className="lede">
-          You long oil? <b className="up">Long it.</b> Short? <b className="down">Short it.</b> Don't want to be long or short but think it's gonna be a wild ride?{" "}
-          <Link to="/yield">/yield</Link>.
-        </p>
-        <p className="fine">Markets the house is actually in. Not advice. Parking-meter money.</p>
+        <h1 className="display">What's spicy.</h1>
+        <p className="mc-line num">House is in. One button each.</p>
         <Flex target={listShare(refWallet)} label="flex the list" />
       </header>
-      <ol className="spicy-list" aria-label="What's spicy right now">
+      <ol className="cards mc-grid" aria-label="What's spicy right now">
         {META.map((p, i) => (
-          <Pick key={`${p.ticker}-${i}`} p={p} v={p.market ? data?.[p.market] : null} loading={loading && !data} />
+          <PickCard key={`${p.ticker}-${i}`} p={p} v={p.market ? data?.[p.market] : null} loading={loading && !data} />
         ))}
       </ol>
-      {META.length === 0 && <p className="note">Nothing spicy on the menu. Add a row to src/meta.ts.</p>}
-      {error && !data && <p className="err">Couldn't reach the chain: {error}</p>}
+      {META.length === 0 && <p className="note">Nothing on the menu.</p>}
+      {error && !data && <p className="err">Chain unreachable: {error}</p>}
+      <details className="mc-fine">
+        <summary className="meta">fine print</summary>
+        <p className="meta num">house is in · not advice · parking-meter money</p>
+      </details>
     </>
   );
 }
 
-/** One pick: tag, $TICKER + headline, the thesis, the live numbers, and exactly one button. */
-function Pick({ p, v, loading }: { p: MetaPick; v: MarketView | null | undefined; loading: boolean }) {
+/** One pick as an infographic: $TICKER, side badge with the live payout, a 3-word reason, price + spark + pots, one button, share. */
+function PickCard({ p, v, loading }: { p: MetaPick; v: MarketView | null | undefined; loading: boolean }) {
+  const nav = useNavigate();
   const under = useUnderlying(v?.underlyingMint);
   const refWallet = useRefWallet();
-  const act = actionFor(p);
+  const to = actionPath(p);
   const coming = !p.market;
   const sideIdx: 0 | 1 | null = p.side === "UP" ? 0 : p.side === "DOWN" ? 1 : null;
+  const cls = p.side === "UP" ? "up" : p.side === "DOWN" ? "down" : "vault";
+  const payout = v && sideIdx !== null ? v.side[sideIdx].leverage : null;
+  const twap = v ? (v.oracle.twap ?? v.oracle.lastTwap) : null;
+  const go = () => to && nav(to);
+  const stop = (e: { stopPropagation(): void }) => e.stopPropagation();
   return (
-    <li className={`spicy-row ${coming ? "coming" : ""}`}>
-      <div className="spicy-copy">
-        <div className="spicy-tags">
-          <span className="chip" aria-label={`tag: ${p.tag}`}>
-            {p.tag}
-          </span>
-          {coming && <span className="badge">coming</span>}
-          {v?.acct.settling && <span className="badge warn">settling</span>}
-          {v && <Flex target={marketShare(v, p.ticker, refWallet)} />}
-        </div>
-        <h2 className="display">
+    <li
+      className={`card mc ${cls} ${coming ? "coming" : ""} ${v?.acct.settling ? "settling" : ""}`}
+      tabIndex={to ? 0 : -1}
+      role={to ? "link" : undefined}
+      onClick={go}
+      onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), go())}
+      aria-label={`${p.ticker} ${p.side}`}
+    >
+      <div className="card-head">
+        <span className="display card-ticker">
           {under?.image && <img className="tokimg" src={under.image} alt="" />}
           {v ? (
-            <Link to={`/m/${p.market}`} className="rowlink">
+            <Link to={`/m/${p.market}`} className="rowlink" onClick={stop}>
               ${p.ticker}
             </Link>
           ) : (
             <>${p.ticker}</>
-          )}{" "}
-          <span className="spicy-headline">{p.headline}</span>
-        </h2>
-        <p className="spicy-thesis">{p.thesis}</p>
-        {v ? (
-          <Live v={v} market={p.market} ticker={p.ticker} side={sideIdx} />
-        ) : coming ? null : loading || v === undefined ? (
-          <span className="skeleton" style={{ height: 52, maxWidth: 560 }} aria-hidden />
-        ) : (
-          <p className="note">Can't read this market right now. The button still works.</p>
-        )}
+          )}
+        </span>
+        <span className="chip mc-tag" aria-label={`tag: ${p.tag}`}>
+          {p.tag}
+        </span>
+        {coming && <span className="badge mc-badge">coming</span>}
+        {v?.acct.settling && <span className="badge warn mc-badge">settling</span>}
       </div>
-      <div className="spicy-act">
-        {act ? (
-          <Link to={act.to} className={`btn big ${act.cls}`}>
-            {act.label}
-            <small>{act.sub}</small>
+      <div className="mc-side-row">
+        <span className={`mc-side ${cls}`}>
+          {p.side}
+          {payout !== null && (
+            <>
+              {" "}
+              <Flash watch={payout} as="b">
+                {lev(payout)}
+              </Flash>
+            </>
+          )}
+        </span>
+        <span className="mc-label" title={p.thesis}>
+          {label(p)}
+        </span>
+      </div>
+      {v && twap !== null ? (
+        <>
+          <div className="card-px num">
+            <Flash watch={twap} className={twap > v.oracle.lastTwap ? "up" : twap < v.oracle.lastTwap ? "down" : ""}>
+              <OraclePrice x={twap} quote={v.oracle.quote} ticker={p.ticker} />
+            </Flash>
+            <Delta x={v.oracle.lastTwap > 0 ? twap / v.oracle.lastTwap - 1 : 0} dp={2} />
+          </div>
+          <Sparkline series={v.oracle.series} base={v.oracle.lastTwap} w={240} h={56} className="card-spark" label={`${p.ticker} oracle, last hour`} />
+          <Tug up={v.side[0].vault} down={v.side[1].vault} levUp={v.side[0].leverage} levDown={v.side[1].leverage} />
+          <Doors v={v} market={p.market} side={sideIdx} />
+        </>
+      ) : coming ? null : loading || v === undefined ? (
+        <span className="skeleton card-skel mc-skel" aria-hidden />
+      ) : (
+        <p className="note mc-note">Chain unreachable.</p>
+      )}
+      <div className="mc-act">
+        {to ? (
+          <Link to={to} className={`btn big ${cls === "vault" ? "" : cls}`} onClick={stop}>
+            {p.side === "VAULT" ? "Park SOL" : p.side}
+            {payout !== null && (
+              <Flash watch={payout} as="b">
+                {lev(payout)}
+              </Flash>
+            )}
           </Link>
         ) : (
           <span className="btn big ghost" aria-disabled="true">
             coming
-            <small>not live yet</small>
           </span>
         )}
-        {v && sideIdx !== null && (
-          <span className="meta num">
-            pays <b className={sideIdx === 0 ? "up" : "down"}>{lev(v.side[sideIdx].leverage)}</b> if right · right now
-          </span>
-        )}
-        {v && p.side === "VAULT" && (
-          <span className="meta num">
-            DOWN pays <b className="down">{lev(v.side[1].leverage)}</b> · the hedge's side
-          </span>
-        )}
+        <CardShare text={shareText(p, v)} path={to ?? "/meta"} target={v ? marketShare(v, p.ticker, refWallet) : undefined} />
       </div>
     </li>
   );
 }
 
-/** Oracle, both curve prices, both pots with their payout: what the board row shows, in one column. */
-function Live({ v, market, ticker, side }: { v: MarketView; market: string; ticker: string; side: 0 | 1 | null }) {
+/** Both doors with their live payout, the picked one underlined; the oracle's age as the only caption. */
+function Doors({ v, market, side }: { v: MarketView; market: string; side: 0 | 1 | null }) {
   const px = usePrices();
+  const stop = (e: { stopPropagation(): void }) => e.stopPropagation();
   return (
-    <div className="spicy-live">
-      <div className="spicy-px num">
-        <OraclePrice x={v.oracle.twap ?? v.oracle.lastTwap} quote={v.oracle.quote} ticker={ticker} />
-        <span className="muted"> · {Math.round(v.acct.windowSecs / 60)} min TWAP · observed {ago(v.oracle.updatedTs)}</span>
-      </div>
-      <div className="spicy-sides num">
-        <Link to={`/m/${market}?side=0`} className={`cell-link up ${side === 0 ? "pick" : ""}`}>
-          UP {usdPrice(px.priceUsd(v.side[0].curvePrice))}
-        </Link>
-        <Link to={`/m/${market}?side=1`} className={`cell-link down ${side === 1 ? "pick" : ""}`}>
-          DOWN {usdPrice(px.priceUsd(v.side[1].curvePrice))}
-        </Link>
-      </div>
-      <Tug up={v.side[0].vault} down={v.side[1].vault} levUp={v.side[0].leverage} levDown={v.side[1].leverage} />
+    <div className="card-doors num">
+      <Link to={`/m/${market}?side=0`} className={`up ${side === 0 ? "pick" : ""}`} onClick={stop} title={`UP curve ${usdPrice(px.priceUsd(v.side[0].curvePrice))}`}>
+        UP <Flash watch={v.side[0].leverage} as="b">{lev(v.side[0].leverage)}</Flash>
+      </Link>
+      <span className="muted">{ago(v.oracle.updatedTs)}</span>
+      <Link to={`/m/${market}?side=1`} className={`down ${side === 1 ? "pick" : ""}`} onClick={stop} title={`DOWN curve ${usdPrice(px.priceUsd(v.side[1].curvePrice))}`}>
+        <Flash watch={v.side[1].leverage} as="b">{lev(v.side[1].leverage)}</Flash> DOWN
+      </Link>
     </div>
   );
 }

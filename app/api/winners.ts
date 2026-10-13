@@ -7,10 +7,13 @@ import { readFileSync } from "fs";
 import path from "path";
 import { emptyState, rfstaccRate, scanWinners, type WinState } from "./_lib/winners.js";
 import { emptyRefs, scanRefs, type RefState } from "./_lib/refs.js";
+import { botAddresses } from "./_lib/feed.js";
+import { memo } from "./_lib/memo.js";
 
-let mem: { at: number; st: WinState } | null = null;
-let inflight: Promise<WinState> | null = null;
-const TTL = 90_000;
+// 15 s fresh; for 10 min after that the last scan is served at once while the next one runs in the background. The first
+// scan of an instance (baseline file + what landed since) is the only one a request ever waits for.
+const TTL = 15_000;
+const STALE = 600_000;
 
 function baseline(): WinState {
   try {
@@ -19,25 +22,8 @@ function baseline(): WinState {
     return emptyState();
   }
 }
-async function state(): Promise<WinState> {
-  if (mem && Date.now() - mem.at < TTL) return mem.st;
-  if (!inflight) {
-    inflight = scanWinners(mem?.st ?? baseline(), { maxPerAccount: 400 })
-      .then((st) => {
-        mem = { at: Date.now(), st };
-        return st;
-      })
-      .finally(() => {
-        inflight = null;
-      });
-  }
-  // serve what we have while the first scan of this instance runs, if it takes too long
-  if (mem) return Promise.race([inflight, new Promise<WinState>((r) => setTimeout(() => r(mem!.st), 4_000))]);
-  return inflight;
-}
+const state = (): Promise<WinState> => memo<WinState>("winners:state", TTL, STALE, (prev) => scanWinners(prev ?? baseline(), { maxPerAccount: 400 }));
 
-let rmem: { at: number; st: RefState } | null = null;
-let rinflight: Promise<RefState> | null = null;
 function refBaseline(): RefState {
   try {
     return JSON.parse(readFileSync(path.join(process.cwd(), "api", "_data", "refs.json"), "utf8")) as RefState;
@@ -45,22 +31,9 @@ function refBaseline(): RefState {
     return emptyRefs();
   }
 }
-async function refState(): Promise<RefState> {
-  if (rmem && Date.now() - rmem.at < TTL) return rmem.st;
-  if (!rinflight) {
-    rinflight = scanRefs(rmem?.st ?? refBaseline(), { maxSigs: 2000 })
-      .then((st) => {
-        rmem = { at: Date.now(), st };
-        return st;
-      })
-      .catch(() => rmem?.st ?? refBaseline()) // a flaky RPC leaves the referral board stale, not broken
-      .finally(() => {
-        rinflight = null;
-      });
-  }
-  if (rmem) return Promise.race([rinflight, new Promise<RefState>((r) => setTimeout(() => r(rmem!.st), 4_000))]);
-  return rinflight;
-}
+// a flaky RPC leaves the referral board stale, not broken
+const refState = (): Promise<RefState> =>
+  memo<RefState>("winners:refs", TTL, STALE, (prev) => scanRefs(prev ?? refBaseline(), { maxSigs: 2000 }).catch(() => prev ?? refBaseline()));
 
 const WINDOWS = { "24h": 86400, "7d": 7 * 86400, "30d": 30 * 86400, all: Infinity } as const;
 function refBoard(st: RefState, start: number, rate: number) {
@@ -136,7 +109,7 @@ function race(rows: Row[], now: number, scanned: number) {
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
-    const [st, rate, rst] = await Promise.all([state(), rfstaccRate(), refState()]);
+    const [st, rate, rst, bots] = await Promise.all([state(), rfstaccRate(), refState(), botAddresses()]);
     const wins = st.wins.map((w) => {
       const f = w.unit === "rfstacc" ? rate : 1;
       return { ...w, cost_sol: w.cost * f, out_sol: w.out * f, gain_sol: w.gain * f, per_hour_sol: w.hold_s > 0 ? (w.gain * f) / (w.hold_s / 3600) : null };
@@ -144,7 +117,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const total = wins.reduce((a, w) => a + w.gain_sol, 0);
     const losses = (st.losses ?? []).map((w) => ({ ...w, gain_sol: w.gain * (w.unit === "rfstacc" ? rate : 1) }));
     const now = Math.floor(Date.now() / 1000);
-    const refRows = rst.hits.map((h) => ({ gain_sol: (h.fee / 1e9) * rate, ts: h.ts, wallet: h.referrer, sig: h.sig, ref: true }));
+    const refHits = { ...rst, hits: rst.hits.filter((h) => !bots.has(h.referrer)) };
+    const refRows = refHits.hits.map((h) => ({ gain_sol: (h.fee / 1e9) * rate, ts: h.ts, wallet: h.referrer, sig: h.sig, ref: true }));
     const rows = [...wins, ...losses, ...refRows];
     res.setHeader("cache-control", "public, max-age=30, s-maxage=60, stale-while-revalidate=600").json({
       at: st.at,
@@ -156,7 +130,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       unparks: wins.filter((w) => w.kind === "unpark").length,
       race: race(rows, now, Math.min(st.at, rst.at)),
       boards: Object.fromEntries(Object.entries(WINDOWS).map(([k, s]) => [k, board(rows, now - s, now + 1).slice(0, 50)])),
-      refs: { at: rst.at, ...Object.fromEntries(Object.entries(WINDOWS).map(([k, s]) => [k, refBoard(rst, now - s, rate)])) },
+      refs: { at: rst.at, ...Object.fromEntries(Object.entries(WINDOWS).map(([k, s]) => [k, refBoard(refHits, now - s, rate)])) },
       wins,
     });
   } catch (e) {

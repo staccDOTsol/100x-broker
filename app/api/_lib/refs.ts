@@ -49,7 +49,8 @@ export async function scanRefs(prev: RefState | null, opts: { maxSigs?: number; 
   let newest: string | undefined;
   let hit = false;
   while (sigs.length < max && !hit) {
-    const page = await retry(() => c.getSignaturesForAddress(POOL, { limit: 1000, before }));
+    // `until` stops the RPC at the cursor: nothing new means an empty page, not 1000 rows to compare
+    const page = await retry(() => c.getSignaturesForAddress(POOL, { limit: 1000, before, until: st.cursor }));
     if (!page.length) break;
     newest ??= page[0].signature;
     for (const s of page) {
@@ -79,8 +80,10 @@ export async function scanRefs(prev: RefState | null, opts: { maxSigs?: number; 
         const data = bs58.decode(ix.data);
         if (data[0] !== 14 || ix.accounts.length < 7) continue; // DepositSol
         const funder = ix.accounts[3].toBase58();
+        const dest = ix.accounts[4].toBase58();
         const referral = ix.accounts[6].toBase58();
-        if (referral === DEV_ATA) continue;
+        // referral == destination: the account received the deposit itself, so its balance change is not a fee
+        if (referral === DEV_ATA || referral === dest) continue;
         const idx = keys.indexOf(referral);
         const post = tx.meta.postTokenBalances?.find((b) => b.accountIndex === idx);
         const pre = tx.meta.preTokenBalances?.find((b) => b.accountIndex === idx);

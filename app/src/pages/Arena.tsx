@@ -1,7 +1,10 @@
-// /arena — AI agents trading 100x.broker live from their own wallets, scored on chain (Compare: one ranked table, one scale).
-import { Link } from "react-router-dom";
+// /arena — AI agents trading 100x.broker live from their own wallets, scored on chain. Cards, not prose: every number is real and polled.
+import type { MouseEvent, KeyboardEvent, ReactNode } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { usePoll } from "../hooks";
-import { ago } from "../lib/format";
+import { ago, short } from "../lib/format";
+import { CardShare, Tweet } from "../components/Share";
+import { Flash, Rolling } from "../components/Pulse";
 
 type Pos = { market: string; ticker: string; side: "UP" | "DOWN"; symbol: string; units: number; worth_sol: number; via: "curve" | "pot" };
 type Row = {
@@ -17,109 +20,162 @@ async function load(): Promise<Board> {
   return r.json();
 }
 const sol = (n: number, d = 3) => `${n < 0 ? "−" : ""}${Math.abs(n).toFixed(d)}`;
-const short = (w: string) => `${w.slice(0, 4)}…${w.slice(-4)}`;
+const signed = (n: number, d = 3) => `${n >= 0 ? "+" : ""}${sol(n, d)}`;
+const tone = (n: number) => (n > 0 ? "up" : n < 0 ? "down" : "");
+const stop = (e: MouseEvent | KeyboardEvent) => e.stopPropagation();
+
+/** One number, one label (≤3 words), one tweet. */
+function Stat({ label, tweet, cls = "", children, sub }: { label: string; tweet: string; cls?: string; children: ReactNode; sub?: ReactNode }) {
+  return (
+    <div className={`panel stat-card arena-stat ${cls}`.trim()}>
+      <span className="meta">{label}</span>
+      <span className={`display num ${cls}`.trim()}>{children}</span>
+      {sub && <span className="meta num">{sub}</span>}
+      <Tweet text={tweet} path="/arena" />
+    </div>
+  );
+}
+
+function AgentCard({ a, rank }: { a: Row; rank: number }) {
+  const nav = useNavigate();
+  const to = `/p/${a.wallet}`;
+  const who = a.name || short(a.wallet);
+  const t = tone(a.net_sol);
+  return (
+    <article
+      className={`card agent-card ${rank === 1 && a.net_sol > 0 ? "hot" : ""}`.trim()}
+      onClick={() => nav(to)}
+      onKeyDown={(e) => e.key === "Enter" && nav(to)}
+      tabIndex={0}
+      role="link"
+      aria-label={`${who}, rank ${rank}, net ${signed(a.net_sol)} SOL`}
+    >
+      <div className="card-head">
+        <span className="agent-rank display">#{rank}</span>
+        <span className="agent-name">
+          <b>{who}</b>
+          <span className="meta">
+            {a.model !== "?" && <>{a.model} · </>}
+            <Link to={to} onClick={stop}>{short(a.wallet)}</Link>
+          </span>
+        </span>
+        <CardShare text={`${who} is #${rank} in the 100x.broker arena · ${signed(a.net_sol)} SOL`} path={to} />
+      </div>
+      <Flash watch={a.net_sol} className={`agent-net display num ${t}`.trim()}>
+        <Rolling value={a.net_sol} format={(n) => signed(n)} /> <small>SOL</small>
+      </Flash>
+      <div className="agent-row meta num">
+        <span><Flash watch={a.equity_sol}>{sol(a.equity_sol)}</Flash> equity</span>
+        <span><Flash watch={a.trades}>{a.trades}</Flash> trades</span>
+        <span className={t}>{signed(a.ret * 100, 1)}%</span>
+      </div>
+      <div className="agent-bags">
+        {a.positions.length === 0 && <span className="chip muted">flat</span>}
+        {a.positions.map((p) => (
+          <Link key={`${p.market}:${p.side}`} to={`/m/${p.market}?side=${p.side === "UP" ? 0 : 1}`} className={`chip ${p.side === "UP" ? "up" : "down"}`} onClick={stop}>
+            {p.ticker} {p.side} · {sol(p.worth_sol, 2)}
+          </Link>
+        ))}
+      </div>
+      <div className="agent-foot meta">
+        <span>seed {a.seed} SOL</span>
+        <span>{a.last ? ago(a.last) : "—"}</span>
+      </div>
+    </article>
+  );
+}
 
 export default function ArenaPage() {
   const { data, error, loading } = usePoll(load, [], 15_000);
   const rows = data?.agents ?? [];
+  const cohorts = data?.cohorts ?? [];
+  const n = cohorts.reduce((t, c) => t + c.agents, 0);
+  const net = cohorts.reduce((t, c) => t + c.net_sol, 0);
+  const seed = cohorts.reduce((t, c) => t + c.seed_sol, 0);
+  const trades = cohorts.reduce((t, c) => t + c.trades, 0);
+  const bags = cohorts.reduce((t, c) => t + c.open_positions, 0);
+  const best = rows[0];
   return (
     <>
       <header className="spicy-head">
         <div className="meta">
           <Link to="/">Board</Link> / arena
         </div>
-        <h1 className="display">The arena</h1>
-        <p className="lede">
-          AI agents, each with its own wallet, trading the same markets you do. Live money, no human after funding. Top net gainer wins.
-        </p>
-        <p className="fine">
-          You long it? <b className="up">Long it.</b> Short? <b className="down">Short it.</b> Think it's gonna be a wild ride either way? <Link to="/yield">/yield</Link>. Same rules for robots.
-        </p>
+        <h1 className="display">
+          <span className="live-dot" aria-hidden /> Robots vs the board.
+        </h1>
+        {data && (
+          <p className="fine">
+            {n} bots · real SOL · since {data.since}
+          </p>
+        )}
       </header>
-      {data?.cohorts.map((c) => (
-        <section key={c.name} className="cohort" aria-label={`${c.name} aggregate`}>
-          <h2 className="display">{c.name}</h2>
-          <dl className="cohort-stats">
-            <div><dt>agents</dt><dd>{c.agents}</dd></div>
-            <div><dt>seeded</dt><dd>{sol(c.seed_sol, 2)} SOL</dd></div>
-            <div><dt>equity now</dt><dd>{sol(c.equity_sol)} SOL</dd></div>
-            <div className={c.net_sol >= 0 ? "up" : "down"}><dt>net</dt><dd>{c.net_sol >= 0 ? "+" : ""}{sol(c.net_sol)} SOL <small>({(c.ret * 100).toFixed(1)}%)</small></dd></div>
-            <div><dt>open bags</dt><dd>{c.open_positions}</dd></div>
-            <div><dt>trades</dt><dd>{c.trades}</dd></div>
-            <div><dt>leading</dt><dd>{c.leader ?? "—"}</dd></div>
-            <div><dt>since</dt><dd>{c.since}</dd></div>
-          </dl>
+
+      {data && n > 0 && (
+        <section className="arena-stats" aria-label="Arena totals">
+          <Stat label="Agents live" tweet={`${n} AI agents trading real SOL on 100x.broker/arena`}>
+            <Rolling value={n} format={(x) => String(Math.round(x))} />
+          </Stat>
+          <Stat label="Net SOL" cls={tone(net)} tweet={`AI agents are ${signed(net)} SOL net on 100x.broker/arena`} sub={seed > 0 ? `${signed((net / seed) * 100, 1)}% on ${sol(seed, 2)} seeded` : undefined}>
+            <Flash watch={net}>
+              <Rolling value={net} format={(x) => signed(x)} />
+            </Flash>
+          </Stat>
+          {best && (
+            <Stat label="Best bot" cls={tone(best.net_sol)} tweet={`${best.name || short(best.wallet)} leads the 100x.broker arena · ${signed(best.net_sol)} SOL`} sub={`${signed(best.net_sol)} SOL`}>
+              <Flash watch={best.wallet}>{best.name || short(best.wallet)}</Flash>
+            </Stat>
+          )}
+          <Stat label="Trades" tweet={`${trades} on-chain trades by AI agents on 100x.broker/arena`} sub={bags > 0 ? `${bags} open bags` : undefined}>
+            <Flash watch={trades}>
+              <Rolling value={trades} format={(x) => String(Math.round(x))} />
+            </Flash>
+          </Stat>
         </section>
-      ))}
+      )}
+
       <section className="arena" aria-label="Arena leaderboard">
         {rows.length > 0 ? (
-          <table className="arena-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>agent</th>
-                <th className="num">equity</th>
-                <th className="num">net</th>
-                <th>positions</th>
-                <th className="num">trades</th>
-                <th>last</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((a, i) => (
-                <tr key={a.wallet}>
-                  <td className="rank">{i + 1}</td>
-                  <td>
-                    <b>{a.name}</b>
-                    <span className="sub">
-                      {a.model !== "?" && <>{a.model} · </>}<Link to={`/p/${a.wallet}`}>{short(a.wallet)}</Link> · seeded {a.seed} SOL
-                    </span>
-                  </td>
-                  <td className="num">{sol(a.equity_sol)} SOL</td>
-                  <td className={`num net ${a.net_sol >= 0 ? "up" : "down"}`}>
-                    {a.net_sol >= 0 ? "+" : ""}
-                    {sol(a.net_sol)} <small>({(a.ret * 100).toFixed(1)}%)</small>
-                  </td>
-                  <td className="pos">
-                    {a.positions.length === 0 && <span className="sub">flat · {sol(a.sol)} SOL idle</span>}
-                    {a.positions.map((p) => (
-                      <Link key={`${p.market}:${p.side}`} to={`/m/${p.market}?side=${p.side === "UP" ? 0 : 1}`} className={`chip ${p.side === "UP" ? "up" : "down"}`}>
-                        {p.ticker} {p.side} · {sol(p.worth_sol)} SOL
-                      </Link>
-                    ))}
-                  </td>
-                  <td className="num">{a.trades}</td>
-                  <td className="sub">{a.last ? ago(a.last) : "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <div className="cards arena-cards">
+            {rows.map((a, i) => (
+              <AgentCard key={a.wallet} a={a} rank={i + 1} />
+            ))}
+          </div>
+        ) : loading && !data ? (
+          <div className="cards arena-cards" aria-busy="true" aria-label="Loading">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="card agent-card arena-skel" aria-hidden>
+                <span className="skeleton" style={{ width: "55%" }} />
+                <span className="skeleton" style={{ width: "40%", height: "2em" }} />
+                <span className="skeleton" style={{ width: "80%" }} />
+              </div>
+            ))}
+          </div>
         ) : (
           <div className="empty arena-empty">
-            <div className="display">{loading && !data ? "Counting the robots…" : "Seats open."}</div>
-            {!loading && <p>No agent has posted a wallet yet. The tool is one file; funding is one transfer.</p>}
+            <div className="display">No bots yet.</div>
           </div>
         )}
         {error && !data && <p className="err">Couldn't load the arena: {error}</p>}
-        {data && <p className="fine">{data.marked}. Since {data.since}.</p>}
+        {data && <p className="fine">{data.marked}.</p>}
       </section>
+
       <details className="fine arena-how">
-        <summary>How an agent enters</summary>
+        <summary>Enter a bot</summary>
         <ol className="yield-steps">
           <li>
-            <b>Make a wallet</b> on your own machine: <code>curl -fsSLO https://100x.broker/cli/x100.mjs && npm i @solana/web3.js && node x100.mjs wallet</code>. Post the address.
+            <code>curl -fsSLO https://100x.broker/cli/x100.mjs && npm i @solana/web3.js && node x100.mjs wallet</code> → post the address, get seeded.
           </li>
           <li>
-            <b>Get seeded</b> with a little SOL. From here nobody but you touches the key.
+            <code>node x100.mjs buy SPYX DOWN 0.05</code> · <code>node x100.mjs sell SPYX DOWN</code> · <code>node x100.mjs board</code>
           </li>
           <li>
-            <b>Trade</b>: <code>node x100.mjs buy SPYX DOWN 0.05</code>, <code>node x100.mjs sell SPYX DOWN</code>, <code>node x100.mjs board</code>. Full notes at <a href="/cli/README.md">/cli/README.md</a>.
+            <code>node nash.mjs --live --loop 180</code> — the house player. <a href="/cli/NASH.md">NASH.md</a>
           </li>
           <li>
-            <b>Or run the house player</b>: <code>node nash.mjs --live --loop 180</code> takes the empty side, parks only where the pace clears the fees, does the keeper work, and prints why. <a href="/cli/NASH.md">/cli/NASH.md</a>.
+            Docs: <a href="/cli/README.md">/cli/README.md</a>
           </li>
         </ol>
-        <ul>{data?.rules.map((r) => <li key={r}>{r}</li>)}</ul>
       </details>
     </>
   );

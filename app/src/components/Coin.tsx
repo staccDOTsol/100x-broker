@@ -4,6 +4,8 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { usePoll, useSend } from "../hooks";
 import { usePrices } from "../hooks/price";
 import { useToasts } from "./Toasts";
+import { Tweet } from "./Share";
+import { Rolling } from "./Pulse";
 import { buildBurnTx, loadBurnPot, memeBalance } from "../lib/burn";
 import { amount as fmtAmount, parseAmount, usd } from "../lib/format";
 import { FEE_SPLIT, MEME_MINT, MEME_SYMBOL, PUMP_URL } from "../config";
@@ -32,21 +34,29 @@ export function CoinStrip() {
   return (
     <section className="coin" id="coin">
       <div className="coin-left">
-        <div className="meta">The coin · ${MEME_SYMBOL}</div>
-        <h2 className="display">30% of every fee buys ${MEME_SYMBOL} and burns it.</h2>
-        <p className="coin-copy">
-          Every fee this protocol collects — the 4% curve fee on every trade, the 4% on every cash-out — splits three ways on-chain:{" "}
-          <b>{FEE_SPLIT.mech}%</b> back into the pots (the losing side's money, mostly to the emptier pot), <b>{FEE_SPLIT.burn}%</b> into a pot that only
-          exists to buy ${MEME_SYMBOL} and burn it, <b>{FEE_SPLIT.dev}%</b> buys <b>BABY100X</b> (the community coin priced in ${MEME_SYMBOL}) and burns that
-          too — the keeper sweeps the dev's cut on a timer, nobody keeps it. The burn is permissionless: bring ${MEME_SYMBOL}, the program
-          burns it and pays you 3% over its own market price. Pre-grad or post-grad, it doesn't care.
-        </p>
+        <div className="meta">
+          The coin · ${MEME_SYMBOL}
+          <span className="right">
+            {p && <Tweet text={`${FEE_SPLIT.burn}% of every 100x.broker fee burns $${MEME_SYMBOL} · ${fmtAmount(p.totalBurned, p.decimals, 0)} burned so far`} path="/#coin" />}
+          </span>
+        </div>
+        <h2 className="display">
+          {FEE_SPLIT.burn}% of fees → <span className="down">burn</span>.
+        </h2>
+        <p className="coin-copy num">on-chain · permissionless · burners paid +3%</p>
         <div className="coin-actions">
           <CopyCA />
           <a className="btn" href={PUMP_URL} target="_blank" rel="noreferrer">
             Buy on pump.fun
           </a>
         </div>
+        <details className="fine">
+          <summary className="meta">how →</summary>
+          <p>
+            4% in, 4% out → <b>{FEE_SPLIT.mech}%</b> pots · <b>{FEE_SPLIT.burn}%</b> buys ${MEME_SYMBOL}, burns it · <b>{FEE_SPLIT.dev}%</b> buys BABY100X, burns it. Bring $
+            {MEME_SYMBOL}, program burns it, pays you +3% over market.
+          </p>
+        </details>
       </div>
       <div className="coin-right">
         <div className="split" role="img" aria-label="Fee split 60 30 10">
@@ -60,17 +70,19 @@ export function CoinStrip() {
             {FEE_SPLIT.dev}% BABY burn
           </span>
         </div>
-        <div className="panel-row">
-          <span className="muted">In the burn pot now</span>
-          <span className="num">{p ? usd(px.quoteUsd(p.pot)) : "—"}</span>
-        </div>
-        <div className="panel-row">
-          <span className="muted">${MEME_SYMBOL} burned so far</span>
-          <span className="num">{p ? fmtAmount(p.totalBurned, p.decimals, 0) : "—"}</span>
-        </div>
-        <div className="panel-row">
-          <span className="muted">Paid to burners</span>
-          <span className="num">{p ? usd(px.quoteUsd(p.totalPaid)) : "—"}</span>
+        <div className="coin-stats">
+          <div className="stat-card">
+            <span className="meta">Burn pot</span>
+            <strong className="display num">{p && px.quoteUsd(p.pot) !== null ? <Rolling value={px.quoteUsd(p.pot)!} format={usd} /> : "—"}</strong>
+          </div>
+          <div className="stat-card">
+            <span className="meta">Burned</span>
+            <strong className="display num">{p ? <Rolling value={Number(p.totalBurned) / 10 ** p.decimals} format={(n) => n.toLocaleString(undefined, { maximumFractionDigits: 0 })} /> : "—"}</strong>
+          </div>
+          <div className="stat-card">
+            <span className="meta">Paid out</span>
+            <strong className="display num">{p && px.quoteUsd(p.totalPaid) !== null ? <Rolling value={px.quoteUsd(p.totalPaid)!} format={usd} /> : "—"}</strong>
+          </div>
         </div>
       </div>
     </section>
@@ -94,11 +106,13 @@ export function BurnPanel() {
   return (
     <section className="panel" id="burn">
       <h2 className="meta">
-        Burn ${MEME_SYMBOL} · get paid · pot {usd(px.quoteUsd(p.pot))}
+        Burn · pot {usd(px.quoteUsd(p.pot))}
+        <span className="right">
+          <Tweet text={`${fmtAmount(p.totalBurned, p.decimals, 0)} $${MEME_SYMBOL} burned so far · ${usd(px.quoteUsd(p.pot))} pot pays +3% to burn more · 100x.broker`} path="/#burn" />
+        </span>
       </h2>
       <p className="note">
-        Bring ${MEME_SYMBOL}; the program burns it and pays you its {p.venue === "curve" ? "bonding-curve" : "PumpSwap"} sell price +3%, in SOL.
-        One burn per minute, max 5% of the pot per burn. Burned so far: <b className="num">{fmtAmount(p.totalBurned, p.decimals, 0)}</b>.
+        {p.venue === "curve" ? "curve" : "PumpSwap"} price +3% in SOL · 1/min · max 5% of pot · burned <b className="num">{fmtAmount(p.totalBurned, p.decimals, 0)}</b>
       </p>
       <div className="field">
         <label htmlFor="burn-amt">
