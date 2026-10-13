@@ -8,6 +8,9 @@ pub mod math;
 pub mod oracle;
 pub mod processor;
 pub mod state;
+pub mod venue;
+#[cfg(test)]
+mod venue_fixtures;
 
 #[cfg(target_os = "solana")]
 mod entry {

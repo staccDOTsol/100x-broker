@@ -55,12 +55,16 @@ pub struct Market {
     pub settling: u8,
     pub settle_side: u8,
     pub ckpt_head: u8,
-    pub _pad: [u8; 3],
+    /// consts::KIND_*; was the first padding byte, so every pre-existing market reads 0 = Raydium CLMM.
+    pub oracle_kind: u8,
+    pub _pad: [u8; 2],
     pub ckpts: [Ckpt; CKPT_COUNT],
 }
 
 impl Market {
     pub const LEN: usize = core::mem::size_of::<Market>();
+    /// Byte offset of `oracle_kind` (pinned so the layout cannot drift under existing accounts).
+    pub const ORACLE_KIND_OFFSET: usize = 493;
 
     /// # Safety
     /// Caller holds a mutable borrow of `data` for the lifetime of the reference.
@@ -154,6 +158,10 @@ pub fn signer<'a, 'b>(seeds: &'b [Seed<'a>; 6]) -> Signer<'a, 'b> {
 
 pub fn token_amount(view: &AccountView) -> Result<u64, ProgramError> {
     let data = view.try_borrow()?;
+    token_amount_bytes(&data)
+}
+
+pub fn token_amount_bytes(data: &[u8]) -> Result<u64, ProgramError> {
     if data.len() < 72 {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -194,5 +202,43 @@ impl BurnState {
             return Err(HookedError::InvalidBurnAccounts.into());
         }
         Ok(unsafe { &mut *(data.as_mut_ptr() as *mut BurnState) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The on-chain markets (e.g. GwzRwcPYSojZiNc4tC4eoLSLD7htk3akWA7qtG68zyHh, 1008 bytes, read
+    /// 2026-10-13) were written with the pre-kind layout: three pad bytes at 493..496, all zero.
+    /// `oracle_kind` must be exactly the first of them so they all read as kind 0.
+    #[test]
+    fn market_layout_is_unchanged() {
+        assert_eq!(Market::LEN, 1008);
+        assert_eq!(core::mem::align_of::<Market>(), 8);
+        let m = unsafe { core::mem::zeroed::<Market>() };
+        let base = &m as *const Market as usize;
+        assert_eq!(&m.oracle_pool as *const Address as usize - base, 104);
+        assert_eq!(&m.oracle_obs as *const Address as usize - base, 136);
+        assert_eq!(&m.last_twap_q32 as *const i64 as usize - base, 424);
+        assert_eq!(&m.window_secs as *const u32 as usize - base, 480);
+        assert_eq!(&m.last_obs_ts as *const u32 as usize - base, 484);
+        assert_eq!(&m.bump as *const u8 as usize - base, 488);
+        assert_eq!(&m.underlying_is_token0 as *const u8 as usize - base, 489);
+        assert_eq!(&m.ckpt_head as *const u8 as usize - base, 492);
+        assert_eq!(&m.oracle_kind as *const u8 as usize - base, Market::ORACLE_KIND_OFFSET);
+        assert_eq!(&m._pad as *const [u8; 2] as usize - base, 494);
+        assert_eq!(&m.ckpts as *const _ as usize - base, 496);
+    }
+
+    #[test]
+    fn zeroed_pad_reads_as_raydium_clmm() {
+        let mut bytes = [0u8; Market::LEN];
+        bytes[..8].copy_from_slice(&MARKET_DISC);
+        let m = Market::from_bytes(&bytes).unwrap();
+        assert_eq!(m.oracle_kind, crate::consts::KIND_RAYDIUM_CLMM);
+        let mut bytes2 = bytes;
+        bytes2[Market::ORACLE_KIND_OFFSET] = 3;
+        assert_eq!(Market::from_bytes(&bytes2).unwrap().oracle_kind, 3);
     }
 }

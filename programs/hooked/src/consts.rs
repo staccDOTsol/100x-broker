@@ -7,6 +7,24 @@ pub const DBC: Address = Address::from_str_const("dbcij3LWUppWqq96dh6gJWwBifmcGf
 /// Every market is quoted in r-freestacc (SPL Token, so the hook can move it).
 pub const QUOTE_MINT: Address = Address::from_str_const("pSYRpDqr847kB2nD5ZhjcPsHLV2ZpUxweXm1MwiSTcc");
 pub const RAYDIUM_CLMM: Address = Address::from_str_const("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
+pub const RAYDIUM_CPMM: Address = Address::from_str_const("CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C");
+pub const METEORA_DAMM_V2: Address = Address::from_str_const("cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG");
+pub const METEORA_DLMM: Address = Address::from_str_const("LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo");
+pub const USDC: Address = Address::from_str_const("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+pub const USDT: Address = Address::from_str_const("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB");
+
+/// `Market.oracle_kind`: which venue the two oracle slots (`oracle_obs`, `oracle_pool`) point at.
+/// 0 is the pre-existing Raydium CLMM observation ring; every market created before kinds existed is 0.
+pub const KIND_RAYDIUM_CLMM: u8 = 0;
+/// oracle_obs = pool.pool_base_token_account, oracle_pool = pool.pool_quote_token_account (token0 = base).
+pub const KIND_PUMPSWAP: u8 = 1;
+/// oracle_obs = token_0_vault, oracle_pool = token_1_vault.
+pub const KIND_RAYDIUM_CPMM: u8 = 2;
+/// both slots = the DAMM v2 Pool (token0 = token_a, price from sqrt_price).
+pub const KIND_METEORA_DAMM_V2: u8 = 3;
+/// both slots = the LbPair (token0 = token_x, price from active_id / bin_step).
+pub const KIND_METEORA_DLMM: u8 = 4;
+pub const KIND_MAX: u8 = 4;
 
 /// Power leverage applied to every rebalance. Fixed for all markets.
 pub const LEVERAGE: u128 = 100;
@@ -51,6 +69,46 @@ pub const PS_BASE_MINT: usize = 43;
 pub const PS_QUOTE_MINT: usize = 75;
 pub const PS_BASE_ATA: usize = 139;
 pub const PS_QUOTE_ATA: usize = 171;
+/// Anchor `account:Pool` (shared by PumpSwap and Meteora DAMM v2; the owner check tells them apart).
+pub const PS_POOL_DISC: [u8; 8] = [241, 154, 109, 4, 17, 177, 109, 188];
+/// Through `lp_supply`; live pools are 211..=301 bytes depending on when the program last wrote them.
+pub const PS_POOL_MIN_LEN: usize = 211;
+/// `virtual_quote_reserves` i128: boost liquidity PumpSwap adds to the quote vault when pricing
+/// (`price = (quote_vault + virtual_quote_reserves) / base_vault`). Absent (= 0) on accounts shorter
+/// than PS_VIRTUAL_QUOTE + 16 that the program wrote before the field existed.
+pub const PS_VIRTUAL_QUOTE: usize = 245;
+
+// Raydium CP-Swap PoolState (raydium-cp-swap programs/cp-swap/src/states/pool.rs, LEN = 637):
+// disc 8 | amm_config | pool_creator | token_0_vault | token_1_vault | lp_mint | token_0_mint | token_1_mint | ...
+pub const CP_POOL_DISC: [u8; 8] = [247, 237, 227, 245, 215, 195, 222, 70];
+pub const CP_POOL_LEN: usize = 637;
+pub const CP_TOKEN_0_VAULT: usize = 72;
+pub const CP_TOKEN_1_VAULT: usize = 104;
+pub const CP_TOKEN_0_MINT: usize = 168;
+pub const CP_TOKEN_1_MINT: usize = 200;
+
+// Meteora DAMM v2 Pool (damm-v2 programs/cp-amm/src/state/pool.rs, 1112 bytes):
+// disc 8 | pool_fees 160 | token_a_mint | token_b_mint | token_a_vault | token_b_vault | whitelisted_vault | padding 32 |
+// liquidity u128 | padding u128 | protocol_a_fee | protocol_b_fee | dead_liquidity_fee_checkpoint | padding 8 |
+// sqrt_min_price u128 | sqrt_max_price u128 | sqrt_price u128 (Q64.64, sqrt(token_b per token_a)) | ...
+pub const DAMM_POOL_DISC: [u8; 8] = PS_POOL_DISC;
+pub const DAMM_POOL_LEN: usize = 1112;
+pub const DAMM_TOKEN_A_MINT: usize = 168;
+pub const DAMM_TOKEN_B_MINT: usize = 200;
+pub const DAMM_SQRT_PRICE: usize = 456;
+
+// Meteora DLMM LbPair (dlmm-sdk idls/dlmm.json v0.12.0, 904 bytes):
+// disc 8 | StaticParameters 32 | VariableParameters 32 | bump_seed 1 | bin_step_seed 2 | pair_type 1 | active_id i32 |
+// bin_step u16 | status 1 | require_base_factor_seed 1 | base_factor_seed 2 | activation_type 1 |
+// creator_pool_on_off_control 1 | token_x_mint | token_y_mint | reserve_x | reserve_y | ...
+pub const DLMM_PAIR_DISC: [u8; 8] = [33, 11, 49, 98, 181, 101, 177, 13];
+pub const DLMM_PAIR_LEN: usize = 904;
+pub const DLMM_ACTIVE_ID: usize = 76;
+pub const DLMM_BIN_STEP: usize = 80;
+pub const DLMM_TOKEN_X_MINT: usize = 88;
+pub const DLMM_TOKEN_Y_MINT: usize = 120;
+/// SPL token account `amount` (same offset under Tokenkeg and Token-2022).
+pub const TOKEN_AMOUNT: usize = 64;
 pub const BURN_SEED: &[u8; 4] = b"burn";
 pub const BURN_STATE_SEED: &[u8; 10] = b"burn-state";
 
@@ -102,9 +160,13 @@ pub const META_SEED: &[u8; 19] = b"extra-account-metas";
 
 /// ExtraAccountMetaList for Execute: market(w), observation(r), vault_bull(w), vault_bear(w), token program(r),
 /// oracle pool(r). Markets created before the pool was added have 5 entries; the hook treats the pool as optional.
+/// Kind-1 (PumpSwap) markets have a 7th entry: the PumpSwap `Pool`, read for `virtual_quote_reserves`.
 pub const EXTRA_METAS: usize = 6;
+pub const EXTRA_METAS_PUMPSWAP: usize = 7;
+pub const fn meta_list_len(extras: usize) -> usize {
+    8 + 4 + 4 + 35 * extras
+}
 /// A ring that has not recorded anything for this long is treated as dead (some Raydium pools never advance
 /// theirs); the market then samples the pool's own tick on every rebalance and builds its TWAP from that.
 pub const RING_STALE_SECS: u32 = 3600;
 pub const RAY_POOL_TICK_CURRENT: usize = 269;
-pub const META_LIST_LEN: usize = 8 + 4 + 4 + 35 * EXTRA_METAS;

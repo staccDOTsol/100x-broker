@@ -1,5 +1,8 @@
 //! Raydium CLMM observation ring -> TWAP tick. Only *stored* observations are used; the live
 //! tick is never extrapolated, so a same-block push cannot reach the price.
+//!
+//! Sampling mode (dead CLMM rings and every non-CLMM `oracle_kind`) integrates a tick the program
+//! reads itself over our own checkpoints; `ring` is `None` when there is no observation ring at all.
 
 use {
     crate::{
@@ -46,9 +49,9 @@ pub fn latest(data: &[u8]) -> Result<Point, ProgramError> {
     Ok(p)
 }
 
-/// Window start: the newest point at or before `latest.ts - window` among the ring and our
-/// checkpoints; if nothing is that old, the oldest point available (shorter window).
-pub fn window_start(data: &[u8], ckpts: &[Ckpt; CKPT_COUNT], latest: Point, window: u32) -> Point {
+/// Window start: the newest point at or before `latest.ts - window` among the ring (if any) and
+/// our checkpoints; if nothing is that old, the oldest point available (shorter window).
+pub fn window_start(ring: Option<&[u8]>, ckpts: &[Ckpt; CKPT_COUNT], latest: Point, window: u32) -> Point {
     let target = latest.ts.saturating_sub(window);
     let mut best: Option<Point> = None;
     let mut oldest = latest;
@@ -63,8 +66,10 @@ pub fn window_start(data: &[u8], ckpts: &[Ckpt; CKPT_COUNT], latest: Point, wind
             oldest = p;
         }
     };
-    for i in 0..RAY_OBS_NUM {
-        consider(ring_point(data, i));
+    if let Some(data) = ring {
+        for i in 0..RAY_OBS_NUM {
+            consider(ring_point(data, i));
+        }
     }
     for c in ckpts.iter() {
         consider(Point { ts: c.ts, tick_cumulative: c.tick_cumulative });
@@ -86,7 +91,7 @@ pub fn twap_q32(start: Point, end: Point) -> Option<i64> {
 pub fn read(data: &[u8], m: &Market) -> Result<Option<(Point, i64)>, ProgramError> {
     check_header(data, &m.oracle_pool)?;
     let end = latest(data)?;
-    let start = window_start(data, &m.ckpts, end, m.window_secs);
+    let start = window_start(Some(data), &m.ckpts, end, m.window_secs);
     Ok(twap_q32(start, end).map(|t| (end, t)))
 }
 
@@ -101,8 +106,8 @@ pub fn ring_is_stale(data: &[u8], now: u32) -> bool {
 /// Self-sampled end point: the newest known cumulative (ring or our checkpoints) extended with the
 /// pool's current tick over the elapsed time — the same integral Raydium would have stored. A sample
 /// only moves the TWAP by elapsed/window, so a one-slot price push is worth almost nothing.
-pub fn sampled_end(data: &[u8], m: &Market, now: u32, tick: i32) -> Point {
-    let ring = latest(data).unwrap_or(Point { ts: 0, tick_cumulative: 0 });
+pub fn sampled_end(ring: Option<&[u8]>, m: &Market, now: u32, tick: i32) -> Point {
+    let ring = ring.and_then(|d| latest(d).ok()).unwrap_or(Point { ts: 0, tick_cumulative: 0 });
     let ck = m.newest_ckpt();
     let base = if ck.ts >= ring.ts { Point { ts: ck.ts, tick_cumulative: ck.tick_cumulative } } else { ring };
     if base.ts == 0 || now <= base.ts {
@@ -112,11 +117,14 @@ pub fn sampled_end(data: &[u8], m: &Market, now: u32, tick: i32) -> Point {
     Point { ts: now, tick_cumulative: base.tick_cumulative.saturating_add(tick as i64 * dt) }
 }
 
-/// Oracle read in sampling mode: (end, TWAP or None while there is no window yet).
-pub fn read_sampled(data: &[u8], m: &Market, now: u32, tick: i32) -> Result<(Point, Option<i64>), ProgramError> {
-    check_header(data, &m.oracle_pool)?;
-    let end = sampled_end(data, m, now, tick);
-    let start = window_start(data, &m.ckpts, end, m.window_secs);
+/// Oracle read in sampling mode: (end, TWAP or None while there is no window yet). `ring` is the
+/// CLMM observation account for kind 0 (header-checked) and `None` for every other kind.
+pub fn read_sampled(ring: Option<&[u8]>, m: &Market, now: u32, tick: i32) -> Result<(Point, Option<i64>), ProgramError> {
+    if let Some(d) = ring {
+        check_header(d, &m.oracle_pool)?;
+    }
+    let end = sampled_end(ring, m, now, tick);
+    let start = window_start(ring, &m.ckpts, end, m.window_secs);
     Ok((end, twap_q32(start, end)))
 }
 
@@ -148,11 +156,11 @@ mod tests {
         let end = latest(&d).unwrap();
         assert_eq!(end.ts, 1_000 + 30 * 99);
         let ck = [Ckpt::default(); CKPT_COUNT];
-        let s = window_start(&d, &ck, end, 600);
+        let s = window_start(Some(&d), &ck, end, 600);
         assert_eq!(end.ts - s.ts, 600);
         assert_eq!(twap_q32(s, end).unwrap(), 30_000i64 << 32);
         // window longer than the ring -> oldest point
-        let s = window_start(&d, &ck, end, 100_000);
+        let s = window_start(Some(&d), &ck, end, 100_000);
         assert_eq!(s.ts, 1_000);
     }
 
@@ -167,14 +175,44 @@ mod tests {
         let now = 1_000 + 86_400 * 100;
         assert!(ring_is_stale(&d, now));
         // first sample: the only older point is the ring's, so the TWAP is the sampled tick itself
-        let (end, t) = read_sampled(&d, &m, now, 500).unwrap();
+        let (end, t) = read_sampled(Some(&d), &m, now, 500).unwrap();
         assert_eq!(t.unwrap() >> 32, 500);
         m.push_ckpt(end.ts, end.tick_cumulative);
         // 300 s at tick 700, then 300 s at tick 300: 600 s window averages to 500
-        let (end2, _) = read_sampled(&d, &m, now + 300, 700).unwrap();
+        let (end2, _) = read_sampled(Some(&d), &m, now + 300, 700).unwrap();
         m.push_ckpt(end2.ts, end2.tick_cumulative);
-        let (_, t3) = read_sampled(&d, &m, now + 600, 300).unwrap();
+        let (_, t3) = read_sampled(Some(&d), &m, now + 600, 300).unwrap();
         assert_eq!(t3.unwrap() >> 32, 500);
+    }
+
+    /// Kinds 1-4: no ring at all. Creation seeds one checkpoint at (now, 0); the first rebalance
+    /// then sees a short window made of the sampled tick alone, and the window fills from there.
+    #[test]
+    fn sampled_twap_without_ring() {
+        let mut m = unsafe { core::mem::zeroed::<Market>() };
+        m.window_secs = 600;
+        let now = 1_700_000_000u32;
+        // creation: no checkpoint yet -> no window, caller falls back to the sampled tick
+        let (end, t) = read_sampled(None, &m, now, -22_241).unwrap();
+        assert_eq!((end.ts, end.tick_cumulative), (now, 0));
+        assert!(t.is_none());
+        m.push_ckpt(end.ts, end.tick_cumulative);
+        // 200 s later at the same tick: window is only 200 s long but the mean is exact
+        let (end, t) = read_sampled(None, &m, now + 200, -22_241).unwrap();
+        assert_eq!(end.tick_cumulative, -22_241i64 * 200);
+        assert_eq!(t.unwrap() >> 32, -22_241);
+        m.push_ckpt(end.ts, end.tick_cumulative);
+        // checkpoints are CKPT_SPACING_SECS apart: 400 s at -22_241 then 200 s at -21_941 over a
+        // 600 s window: mean -22_141
+        let (end, _) = read_sampled(None, &m, now + 400, -22_241).unwrap();
+        m.push_ckpt(end.ts, end.tick_cumulative);
+        assert_eq!(m.newest_ckpt().ts, now + 400);
+        let (end, t) = read_sampled(None, &m, now + 600, -21_941).unwrap();
+        assert_eq!(t.unwrap() >> 32, -22_141);
+        m.push_ckpt(end.ts, end.tick_cumulative);
+        // same-second re-read does not integrate anything (dt = 0 from the newest checkpoint)
+        let (again, _) = read_sampled(None, &m, now + 600, 999_999).unwrap();
+        assert_eq!(again, end);
     }
 
     #[test]
@@ -186,7 +224,7 @@ mod tests {
         let mut ck = [Ckpt::default(); CKPT_COUNT];
         ck[0] = Ckpt { ts: 10_000 - 3_000, _pad: 0, tick_cumulative: 5 * 3_000 };
         let end = latest(&d).unwrap();
-        let s = window_start(&d, &ck, end, 3_960);
+        let s = window_start(Some(&d), &ck, end, 3_960);
         assert_eq!(s.ts, 7_000);
         assert_eq!(twap_q32(s, end).unwrap() >> 32, -5);
     }

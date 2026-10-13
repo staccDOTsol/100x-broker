@@ -29,6 +29,11 @@ pub enum HookedError {
     BurnCooldown,
     BurnTooLarge,
     InvalidBurnAccounts,
+    /// create_market: `oracle_kind` byte outside 0..=4.
+    InvalidOracleKind,
+    /// create_market: the venue pool's mints are not {underlying, WSOL|USDC|USDT}, or the client's
+    /// `underlying_is_token0` disagrees with which side the quote mint is on.
+    UnderlyingFlagMismatch,
 }
 
 impl From<HookedError> for ProgramError {
