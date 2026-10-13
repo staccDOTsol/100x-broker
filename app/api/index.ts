@@ -117,6 +117,7 @@ const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
 
 export default function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("cache-control", "public, max-age=300, s-maxage=3600");
+  res.setHeader("vary", "accept");
   if (req.query.spec !== undefined || /application\/json/.test(String(req.headers.accept ?? "")) && req.query.ui === undefined) {
     res.setHeader("access-control-allow-origin", "*");
     return res.json(spec);
