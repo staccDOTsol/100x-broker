@@ -51,8 +51,10 @@ async function forward(payload: string, historical: boolean): Promise<{ status: 
       const r = await post(u.url).catch(() => null);
       if (r) {
         const text = await r.text();
-        const declined = /"code":\s*-32429|Too Many Requests|not supported|Method not found|excluded from account secondary indexes|too many accounts|-32601/i.test(text);
-        if (r.status !== 429 && r.status < 500 && !declined) return { status: r.status, text, via: u.via };
+        const declined = /"code":\s*-32429|Too Many Requests|not supported|Method not found|excluded from account secondary indexes|too many accounts|-32601|invalid api key|unauthorized/i.test(text);
+        // an upstream's own auth/quota failure (401/403) is not an answer to the caller: try the next one
+        const rejected = r.status === 401 || r.status === 403;
+        if (r.status !== 429 && r.status < 500 && !declined && !rejected) return { status: r.status, text, via: u.via };
         last = { status: r.status, text, via: u.via };
       }
       if (u.primary && i === 0) await sleep(200);
