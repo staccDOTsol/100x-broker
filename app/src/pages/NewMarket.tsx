@@ -5,7 +5,7 @@ import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction } from "@solana/spl-token";
 import { conn, dbc, marketsForOracle, oracleHealth, sendRaw, type OracleHealth } from "../lib/chain";
 import { createMarketIx, cu, marketPda, sideAccounts, type MarketKeys } from "../lib/hooked";
-import { MOVE_1PCT, VENUE_LABEL, candidateMove1PctUsd, candidateTvlUsd, decodeVenuePool, discoverPools, quoteSymbolOf, type PoolCandidate } from "../lib/venues";
+import { VENUE_LABEL, candidateEffectiveQuote, candidateMove1PctQuote, candidateMove1PctUsd, candidateTvlUsd, decodeVenuePool, discoverPools, quoteSymbolOf, type PoolCandidate } from "../lib/venues";
 import { marketCurve } from "../lib/curve";
 import { humanError } from "../hooks";
 import { usePrices } from "../hooks/price";
@@ -20,8 +20,9 @@ import { DEFAULT_WINDOW_SECS, LEVERAGE, PROGRAM_ID, REDEEM_FEE, RFSTACC } from "
 
 /** One oracle candidate: a venue pool (src/lib/venues.ts) plus, for CLMM, its observation-ring health. */
 type PoolRow = PoolCandidate & { health: OracleHealth | null };
-/** AMM venues have no ring to judge; they are usable the moment they hold both reserves. */
-const usable = (p: PoolRow) => (p.venue === "clmm" ? !!p.health?.ok : p.quoteReserve !== null && p.quoteReserve > 0n);
+/** AMM venues have no ring to judge; they are usable the moment the quote they price against is positive (PumpSwap: quote
+ *  vault + the Pool's virtual_quote_reserves). */
+const usable = (p: PoolRow) => (p.venue === "clmm" ? !!p.health?.ok : (candidateEffectiveQuote(p) ?? 0n) > 0n);
 const usdRound = (x: number | null) => (x === null ? "—" : `$${x.toLocaleString("en-US", { maximumFractionDigits: 0 })}`);
 type StepState = "idle" | "active" | "done" | "failed";
 // Same four on-chain steps, same order; labels are display-only.
@@ -280,7 +281,8 @@ export default function NewMarket() {
     const m = poolMove(p);
     if (m !== null) return `~${usdRound(m)} to move 1%`;
     // SOL quote before /api/price answered: say it in SOL
-    return p.quoteReserve === null ? "no reserves" : `~${((Number(p.quoteReserve) * MOVE_1PCT) / 10 ** p.quoteDecimals).toFixed(2)} ${p.quote} to move 1%`;
+    const mq = candidateMove1PctQuote(p);
+    return mq === null ? "no reserves" : `~${mq.toFixed(2)} ${p.quote} to move 1%`;
   };
   return (
     <>
@@ -555,6 +557,14 @@ export default function NewMarket() {
                     <span className="muted">{pool.quote} in pool</span>
                     <span className="num">{pool.quoteReserve === null ? "—" : `${(Number(pool.quoteReserve) / 10 ** pool.quoteDecimals).toLocaleString("en-US", { maximumFractionDigits: 2 })} ${pool.quote}`}</span>
                   </div>
+                  {pool.venue === "pumpswap" && (
+                    <div className="panel-row">
+                      <span className="muted">+ virtual (prices against)</span>
+                      <span className="num">
+                        {`${(Number(pool.virtualQuote) / 10 ** pool.quoteDecimals).toLocaleString("en-US", { maximumFractionDigits: 2 })} → ${((Number(candidateEffectiveQuote(pool) ?? 0n)) / 10 ** pool.quoteDecimals).toLocaleString("en-US", { maximumFractionDigits: 2 })} ${pool.quote}`}
+                      </span>
+                    </div>
+                  )}
                   <div className="panel-row">
                     <span className="muted">To move 1%</span>
                     <span className="num">{healthNote(pool).replace(/ to move 1%$/, "")}</span>

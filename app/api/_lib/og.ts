@@ -8,6 +8,7 @@ import { Resvg } from "@resvg/resvg-js";
 import sharp from "sharp";
 import { getAsset } from "./das.js";
 import { memo } from "./memo.js";
+import { MARKET_ORACLE_KIND, VENUE_LABEL, type Venue, pumpSwapPoolOf, slotMints, slotSpotTick, venueOfKind } from "../../src/lib/venues.js";
 
 const PROGRAM_ID = new PublicKey(process.env.VITE_PROGRAM_ID ?? "T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb");
 const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
@@ -144,34 +145,62 @@ export type MarketCard = {
   quoteUsd: (raw: bigint) => number | null;
   series: Pt[];
   quoteSymbol: string;
+  venue: Venue;
 };
 
 export type Pt = { ts: number; price: number };
-/** The coin's price over the ring's memory (plus checkpoints): the average tick between consecutive observations. */
-export function seriesFromMarket(d: Buffer, obs: Buffer, opool: Buffer, sinceTs: number): Pt[] {
+/** The coin's price over the ring's memory (plus checkpoints): the average tick between consecutive observations.
+ *  Kinds 1-4 have no ring: `obs` is then a reserve/pool account and only the checkpoints (plus the live spot) are charted;
+ *  pass `live` for that and the decimals explicitly. */
+export function seriesFromMarket(d: Buffer, obs: Buffer, opool: Buffer, sinceTs: number, kind = 0, dec?: [number, number], live?: { ts: number; tick: number }): Pt[] {
   const flag = d[489];
-  const d0 = opool[233];
-  const d1 = opool[234];
+  const d0 = dec ? dec[0] : opool[233];
+  const d1 = dec ? dec[1] : opool[234];
   const raw: { ts: number; tc: bigint }[] = [];
-  for (let i = 0; i < 100; i++) {
-    const ts = obs.readUInt32LE(51 + i * 44);
-    if (ts > 0) raw.push({ ts, tc: obs.readBigInt64LE(51 + i * 44 + 4) });
+  if (kind === 0) {
+    for (let i = 0; i < 100; i++) {
+      const ts = obs.readUInt32LE(51 + i * 44);
+      if (ts > 0) raw.push({ ts, tc: obs.readBigInt64LE(51 + i * 44 + 4) });
+    }
   }
   for (let i = 0; i < 32; i++) {
     const ts = d.readUInt32LE(496 + i * 16);
     if (ts > 0) raw.push({ ts, tc: d.readBigInt64LE(496 + i * 16 + 8) });
   }
   raw.sort((a, b) => a.ts - b.ts);
+  const toPrice = (tick: number) => (flag ? Math.pow(1.0001, tick) * 10 ** (d0 - d1) : Math.pow(1.0001, -tick) * 10 ** (d1 - d0));
   const pts: Pt[] = [];
   for (let i = 1; i < raw.length; i++) {
     const dt = raw[i].ts - raw[i - 1].ts;
     if (dt <= 0) continue;
-    const tick = Number(raw[i].tc - raw[i - 1].tc) / dt;
-    const price = flag ? Math.pow(1.0001, tick) * 10 ** (d0 - d1) : Math.pow(1.0001, -tick) * 10 ** (d1 - d0);
+    const price = toPrice(Number(raw[i].tc - raw[i - 1].tc) / dt);
     if (Number.isFinite(price) && price > 0) pts.push({ ts: raw[i].ts, price });
+  }
+  if (live && Number.isFinite(live.tick)) {
+    const price = toPrice(live.tick);
+    if (Number.isFinite(price) && price > 0) pts.push({ ts: live.ts, price });
   }
   const recent = pts.filter((p) => p.ts >= sinceTs);
   return recent.length >= 6 ? recent : pts.slice(-24);
+}
+
+/** Sampled TWAP (kinds 1-4): newest checkpoint extended with the live tick to now, averaged back over the window. Mirrors oracle.rs read_sampled with no ring. */
+function sampledTwapQ32(ckpts: { ts: number; tc: bigint }[], window: number, now: number, tick: number): bigint | null {
+  const valid = ckpts.filter((c) => c.ts > 0).sort((a, b) => b.ts - a.ts);
+  const newest = valid[0];
+  if (!newest || !Number.isFinite(tick)) return null;
+  const end = { ts: now, tc: newest.tc + BigInt(Math.round(tick)) * BigInt(Math.max(0, now - newest.ts)) };
+  const target = Math.max(0, end.ts - window);
+  let best: typeof end | undefined;
+  let oldest = end;
+  for (const p of valid) {
+    if (p.ts > end.ts) continue;
+    if (p.ts <= target && (!best || p.ts > best.ts)) best = p;
+    if (p.ts < oldest.ts) oldest = p;
+  }
+  const start = best ?? oldest;
+  if (start.ts === end.ts) return null;
+  return ((end.tc - start.tc) << 32n) / BigInt(end.ts - start.ts);
 }
 
 /** A little line chart: the window's path plus its change, drawn as inline SVG (satori renders paths). */
@@ -253,13 +282,34 @@ async function loadMarketCard(key: PublicKey, withImage: boolean): Promise<Marke
   const flag = d[489];
   const windowSecs = d.readUInt32LE(480);
   const ckpts = Array.from({ length: 32 }, (_, i) => ({ ts: d.readUInt32LE(496 + i * 16), tc: i64(d, 496 + i * 16 + 8) }));
-  const d0 = opool.data[233];
-  const d1 = opool.data[234];
-  const underlying = pk(opool.data, flag ? 73 : 105);
-  const quoteMint = pk(opool.data, flag ? 105 : 73).toBase58();
+  const kind = d[MARKET_ORACLE_KIND];
+  const venue = venueOfKind(kind);
+  const nowTs = Math.floor(Date.now() / 1000);
+  // kind 0 reads mints + decimals off the CLMM pool; kinds 1-4 read the mints off the slot accounts and the decimals off the mints
+  let d0: number, d1: number, underlying: PublicKey, quoteMint: string;
+  let live: { ts: number; tick: number } | undefined;
+  if (venue === "clmm") {
+    d0 = opool.data[233];
+    d1 = opool.data[234];
+    underlying = pk(opool.data, flag ? 73 : 105);
+    quoteMint = pk(opool.data, flag ? 105 : 73).toBase58();
+  } else {
+    const { mint0, mint1 } = slotMints(venue, obs.data, opool.data);
+    // kind 1 prices against quote vault + the PumpSwap Pool's virtual_quote_reserves, so the Pool comes along
+    const [[m0, m1], psPool] = await Promise.all([
+      c.getMultipleAccountsInfo([mint0, mint1]),
+      venue === "pumpswap" ? pumpSwapPoolOf(c, bullMint, oracleObs, oraclePool, obs.data) : null,
+    ]);
+    if (!m0 || !m1) throw new Error("oracle mints missing");
+    d0 = m0.data[44];
+    d1 = m1.data[44];
+    underlying = flag ? mint0 : mint1;
+    quoteMint = (flag ? mint1 : mint0).toBase58();
+    live = { ts: nowTs, tick: slotSpotTick(venue, obs.data, opool.data, psPool?.data) };
+  }
   const [sol, rate, asset] = await Promise.all([solUsd(), lstRate(c), getAsset(underlying.toBase58()).catch(() => null)]);
   const quoteUsd = (raw: bigint) => (sol ? (Number(raw) / 1e9) * rate * sol : null);
-  const tq = twapQ32(obs.data, ckpts, windowSecs) ?? i64(d, 424);
+  const tq = (venue === "clmm" ? twapQ32(obs.data, ckpts, windowSecs) : sampledTwapQ32(ckpts, windowSecs, nowTs, live!.tick)) ?? i64(d, 424);
   const tick = Number(tq) / 2 ** 32;
   const priceInQuote = flag ? Math.pow(1.0001, tick) * 10 ** (d0 - d1) : Math.pow(1.0001, -tick) * 10 ** (d1 - d0);
   const oracleUsd = quoteMint === WSOL ? (sol ? priceInQuote * sol : null) : STABLES.has(quoteMint) ? priceInQuote : null;
@@ -295,8 +345,9 @@ async function loadMarketCard(key: PublicKey, withImage: boolean): Promise<Marke
     windowMin: Math.round(windowSecs / 60),
     sides: [mk(0, mB, pB, bvB, bullMint), mk(1, mR, pR, bvR, bearMint)],
     quoteUsd,
-    series: seriesFromMarket(d, obs.data, opool.data, Math.floor(Date.now() / 1000) - 86400),
+    series: seriesFromMarket(d, obs.data, opool.data, nowTs - 86400, kind, [d0, d1], live),
     quoteSymbol: quoteMint === WSOL ? "SOL" : STABLES.has(quoteMint) ? "USD" : "quote",
+    venue,
   };
 }
 
@@ -378,7 +429,7 @@ function tokenHead(m: MarketCard, size = 120) {
   return row(
     { alignItems: "center", gap: 20 },
     m.image ? h("img", { src: m.image, width: size, height: size, style: { borderRadius: size / 2 } }) : null,
-    col({}, display(`$${m.ticker}`, size * 1.1), meta(`±100× · Raydium TWAP · ${m.windowMin} min`)),
+    col({}, display(`$${m.ticker}`, size * 1.1), meta(`±100× · ${VENUE_LABEL[m.venue]} TWAP · ${m.windowMin} min`)),
   );
 }
 

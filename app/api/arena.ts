@@ -8,10 +8,11 @@
 //   POST /api/arena {kind:"park",   vault, sol, payer}   -> { txs: [base64...], steps, summary }   (sign and send in order)
 //   POST /api/arena {kind:"unpark", vault, pct?, payer}  -> { txs, steps, summary }
 //   POST /api/arena {kind:"finish", vault, payer}        -> { txs, steps, summary }   (after an unpark that stopped half way)
-//   GET  /api/arena?pools=<mint>  -> Raydium CLMM pools for a coin, oracle health, existing markets (list a coin: pools -> create-pool/seed-pool -> create-market -> create-vault)
+//   GET  /api/arena?pools=<mint>  -> oracle-capable pools for a coin on every venue (Raydium CLMM/CPMM, PumpSwap, Meteora DAMM v2/DLMM): venue, depth or
+//                                    ring health, existing markets (list a coin: pools -> [create-pool/seed-pool] -> create-market -> create-vault)
 //   POST {kind:"create-pool", mint, sol, payer}            -> buy the coin + create a SOL CLMM pool at its current price
 //   POST {kind:"seed-pool", pool, sol, payer}              -> open a wide position with what the wallet holds
-//   POST {kind:"create-market", mint|pool, window?, payer} -> curve config, UP curve, DOWN curve, market (returns `keys` to resume with)
+//   POST {kind:"create-market", mint|pool, window?, payer} -> curve config, UP curve, DOWN curve, market (returns `keys` to resume with); `pool` may be on any venue
 //   POST {kind:"create-vault", market, payer}              -> a /yield vault over the oracle pool's live tick range
 //   GET  /api/arena?keeper=1      -> what needs doing: pokes, settles, claims, vaults outside their hedge band
 //   POST {kind:"poke"|"settle"|"claim", market, side?, payer} -> permissionless keeper calls on a market
@@ -26,6 +27,7 @@ import { SwapMode } from "@meteora-ag/dynamic-bonding-curve-sdk";
 import BN from "bn.js";
 import { buildSettleTx, conn, dbc, decodeMarket, marketsForOracle, oracleHealth, quoteSymbolOf, settleAmount, toV0, userBalances, type MarketView } from "../src/lib/chain.js";
 import { claimFeesIx, createMarketIx, cu, marketPda, pokeIx, sideAccounts, type MarketKeys } from "../src/lib/hooked.js";
+import { VENUE_LABEL, candidateEffectiveQuote, candidateMove1PctQuote, candidateMove1PctUsd, candidateTvlUsd, decodeVenuePool, discoverPools, pumpSwapEffectiveQuote, pumpSwapVirtualQuote, tokenAmount, type PoolCandidate } from "../src/lib/venues.js";
 import { marketCurve } from "../src/lib/curve.js";
 import { depositOut, depositSolIx, poolState, withdrawCapacity, withdrawOut, withdrawSolIx, type PoolState } from "../src/lib/zap.js";
 import { growthSince, listVaults, loadVault, shareBalance, vaultCreatedTs, withdrawIxs, type VaultView } from "../src/lib/dn.js";
@@ -94,18 +96,65 @@ const sideRow = (s: MarketView["side"][0]) => ({
   at_floor: s.atFloor,
   circulating: Number(s.circulating) / 10 ** s.decimals,
 });
-/** Oracle pool depth (USD) for every market's oracle, one Raydium call, cached 5 min (an hour stale). Thin pools make 100× a coin flip that wipes a side every hour. */
+/** Oracle pool depth (USD) for every market's oracle, keyed by oracle_pool slot, cached 5 min (an hour stale). Thin pools make 100× a coin flip
+ *  that wipes a side every hour. CLMM: one Raydium call. Meteora: the data API per pool. PumpSwap/CPMM: twice the quote reserve (the
+ *  oracle_pool slot is the quote vault when the coin is token0; otherwise oracle_obs is) at the SOL price. */
 const THIN_ORACLE_USD = 25_000;
+async function solUsdQuick(): Promise<number | null> {
+  try {
+    const r = await fetch("https://lite-api.jup.ag/price/v3?ids=So11111111111111111111111111111111111111112", { signal: AbortSignal.timeout(4000) });
+    const p = Number(((await r.json()) as any)?.So11111111111111111111111111111111111111112?.usdPrice);
+    return Number.isFinite(p) && p > 0 ? p : null;
+  } catch {
+    return null;
+  }
+}
 function oracleDepths(all: MarketView[]) {
   const ids = [...new Set(all.map((v) => v.keys.oraclePool.toBase58()))].sort();
   return memo(`arena:depth:${ids.join(",")}`, 300_000, 3_600_000, async () => {
     const m = new Map<string, number>();
-    try {
-      const r = await fetch(`https://api-v3.raydium.io/pools/info/ids?ids=${ids.join(",")}`);
-      const j: any = await r.json();
-      for (const p of j?.data ?? []) if (p?.id) m.set(p.id, Number(p.tvl ?? 0));
-    } catch {
-      /* no depth, no flag */
+    const clmm = all.filter((v) => v.oracle.venue === "clmm");
+    const meteora = all.filter((v) => v.oracle.venue === "dammv2" || v.oracle.venue === "dlmm");
+    const amm = all.filter((v) => v.oracle.venue === "pumpswap" || v.oracle.venue === "cpmm");
+    if (clmm.length) {
+      try {
+        const r = await fetch(`https://api-v3.raydium.io/pools/info/ids?ids=${[...new Set(clmm.map((v) => v.keys.oraclePool.toBase58()))].join(",")}`);
+        const j: any = await r.json();
+        for (const p of j?.data ?? []) if (p?.id) m.set(p.id, Number(p.tvl ?? 0));
+      } catch {
+        /* no depth, no flag */
+      }
+    }
+    await Promise.all(
+      meteora.map(async (v) => {
+        try {
+          const host = v.oracle.venue === "dammv2" ? "damm-v2" : "dlmm";
+          const j: any = await (await fetch(`https://${host}.datapi.meteora.ag/pools/${v.keys.oraclePool.toBase58()}`, { signal: AbortSignal.timeout(6000) })).json();
+          if (Number.isFinite(Number(j?.tvl))) m.set(v.keys.oraclePool.toBase58(), Number(j.tvl));
+        } catch {
+          /* no depth, no flag */
+        }
+      }),
+    );
+    if (amm.length) {
+      try {
+        const sol = await solUsdQuick();
+        const quoteSlots = amm.map((v) => (v.keys.underlyingIsToken0 ? v.keys.oraclePool : v.keys.oracleObs));
+        // PumpSwap prices against vault + Pool.virtual_quote_reserves: that effective quote is the depth (loadMarketView resolved the Pool)
+        const psPools = amm.map((v) => (v.oracle.venue === "pumpswap" && v.keys.venuePool) || null);
+        const [infos, pools] = await Promise.all([conn.getMultipleAccountsInfo(quoteSlots), conn.getMultipleAccountsInfo(psPools.filter((k): k is PublicKey => !!k))]);
+        let pi = 0;
+        amm.forEach((v, i) => {
+          const q = v.oracle.quote === "SOL" ? sol : v.oracle.quote === "?" ? null : 1;
+          const dec = v.oracle.quote === "SOL" ? 9 : 6;
+          const ps = psPools[i] ? pools[pi++] : null;
+          if (!infos[i] || !q) return;
+          const eff = v.oracle.venue === "pumpswap" ? pumpSwapEffectiveQuote(tokenAmount(infos[i]!.data), ps ? pumpSwapVirtualQuote(ps.data) : 0n) ?? 0n : tokenAmount(infos[i]!.data);
+          m.set(v.keys.oraclePool.toBase58(), (2 * Number(eff) * q) / 10 ** dec);
+        });
+      } catch {
+        /* no depth, no flag */
+      }
     }
     return m;
   });
@@ -116,7 +165,7 @@ const listRow = (v: MarketView, tvl?: number) => ({
   ticker: v.ticker,
   mint: v.underlyingMint,
   market: v.acct.key.toBase58(),
-  oracle: { spot: v.oracle.spot, twap: v.oracle.twap, quote: v.oracle.quote, pool: v.keys.oraclePool.toBase58(), pool_tvl_usd: tvl ?? null, thin: tvl !== undefined && tvl < THIN_ORACLE_USD },
+  oracle: { spot: v.oracle.spot, twap: v.oracle.twap, quote: v.oracle.quote, venue: v.oracle.venue, pool: v.keys.oraclePool.toBase58(), pool_tvl_usd: tvl ?? null, thin: tvl !== undefined && tvl < THIN_ORACLE_USD },
   risk: oracleRisk(tvl),
   owed: { up: v.side[0].owed, down: v.side[1].owed },
   up: sideRow(v.side[0]),
@@ -418,7 +467,7 @@ const SITE = "https://100x.broker";
 const { Raydium, TxVersion, CLMM_PROGRAM_ID } = RaySdk as any;
 type PoolRow = { id: PublicKey; mint0: PublicKey; mint1: PublicKey; quote: string; tvl: number; volume24h: number };
 
-/** Raydium v3: CLMM pools containing this mint, deepest first, SOL/USDC/USDT quotes only (those are the oracles we read). */
+/** Raydium v3: CLMM pools containing this mint, deepest first, SOL/USDC/USDT quotes only (create-pool / seed-pool still live on CLMM). */
 async function raydiumPools(mint: PublicKey): Promise<PoolRow[]> {
   const u = `https://api-v3.raydium.io/pools/info/mint?mint1=${mint.toBase58()}&poolType=concentrated&poolSortField=liquidity&sortType=desc&pageSize=12&page=1`;
   const r = await fetch(u);
@@ -435,27 +484,40 @@ async function raydiumPools(mint: PublicKey): Promise<PoolRow[]> {
   }
   return rows;
 }
-async function oracleCandidates(mint: PublicKey) {
-  const cands = await raydiumPools(mint);
+/** Every oracle-capable pool for a coin across venues (src/lib/venues.ts): CLMM rows carry ring health, AMM rows carry depth. */
+type Candidate = PoolCandidate & { health: ReturnType<typeof oracleHealth> | null; markets: PublicKey[]; usable: boolean; tvlUsd: number | null; move1pctUsd: number | null };
+async function oracleCandidates(mint: PublicKey, keep?: PublicKey): Promise<Candidate[]> {
+  const [cands, sol] = await Promise.all([discoverPools(conn, mint), solUsdQuick()]);
   if (!cands.length) return [];
-  const infos = await conn.getMultipleAccountsInfo(cands.map((c) => c.id));
-  const obsKeys = infos.map((i) => (i ? new PublicKey(i.data.subarray(201, 233)) : null));
-  const obsInfos = await conn.getMultipleAccountsInfo(obsKeys.filter((k): k is PublicKey => !!k));
-  let oi = 0;
-  const rows = await Promise.all(
-    cands.map(async (c, i) => {
-      const obs = obsKeys[i];
-      const od = obs ? obsInfos[oi++] : null;
-      const health = od ? oracleHealth(od.data) : null;
-      const mk = obs ? await marketsForOracle(obs).catch(() => [] as PublicKey[]) : [];
-      return { ...c, obs: obs ?? c.id, health, markets: mk };
-    }),
-  );
-  rows.sort((a, b) => Number(b.quote === "SOL") - Number(a.quote === "SOL") || Number(!!b.health?.ok) - Number(!!a.health?.ok) || b.tvl - a.tvl);
-  return rows;
+  const scored = cands.map((c) => {
+    const health = c.obsData ? oracleHealth(c.obsData) : null;
+    // AMMs: usable once the quote the venue prices against is positive (PumpSwap: vault + virtual_quote_reserves)
+    const usable = c.venue === "clmm" ? !!health?.ok : candidateEffectiveQuote(c) !== null && candidateEffectiveQuote(c)! > 0n;
+    return { ...c, health, usable, tvlUsd: candidateTvlUsd(c, sol), move1pctUsd: candidateMove1PctUsd(c, sol) };
+  });
+  scored.sort((a, b) => Number(b.quote === "SOL") - Number(a.quote === "SOL") || Number(b.usable) - Number(a.usable) || (b.tvlUsd ?? 0) - (a.tvlUsd ?? 0));
+  // five venues can mean dozens of dust pools; keep the ones with real liquidity (and a pinned pool), a dozen at most, before the per-pool market scans
+  const live = scored.filter((c) => (c.tvlUsd ?? 0) >= 10 || (keep && c.pool.equals(keep)));
+  const top = (live.length ? live : scored).slice(0, 12);
+  return Promise.all(top.map(async (c) => ({ ...c, markets: await marketsForOracle(c.slotObs).catch(() => [] as PublicKey[]) })));
 }
-const poolsOut = (rows: Awaited<ReturnType<typeof oracleCandidates>>) =>
-  rows.map((r) => ({ pool: r.id.toBase58(), quote: r.quote, tvl_usd: r.tvl, volume24h_usd: r.volume24h, observation: r.obs.toBase58(), oracle_ok: !!r.health?.ok, oracle: r.health, markets: r.markets.map((k) => `${SITE}/m/${k.toBase58()}`) }));
+const poolsOut = (rows: Candidate[]) =>
+  rows.map((r) => ({
+    pool: r.pool.toBase58(), venue: r.venue, venue_label: VENUE_LABEL[r.venue], oracle_kind: r.kind, quote: r.quote, tvl_usd: r.tvlUsd, volume24h_usd: r.volume24h,
+    // what the market stores: oracle_obs (also the market PDA seed) and oracle_pool
+    observation: r.slotObs.toBase58(), oracle_pool: r.slotPool.toBase58(), oracle_ok: r.usable, oracle: r.health,
+    // AMM venues: the quote the venue prices against is the manipulation cost (constant product: ~0.5% of it moves the price 1%);
+    // PumpSwap adds its Pool's virtual_quote_reserves to the vault, so depth is that effective quote
+    depth: r.venue === "clmm"
+      ? null
+      : {
+          quote_reserve: r.quoteReserve === null ? null : Number(r.quoteReserve) / 10 ** r.quoteDecimals,
+          ...(r.venue === "pumpswap" ? { virtual_quote: Number(r.virtualQuote) / 10 ** r.quoteDecimals, effective_quote: candidateEffectiveQuote(r) === null ? null : Number(candidateEffectiveQuote(r)) / 10 ** r.quoteDecimals } : {}),
+          move_1pct_quote: candidateMove1PctQuote(r),
+          move_1pct_usd: r.move1pctUsd,
+        },
+    markets: r.markets.map((k) => `${SITE}/m/${k.toBase58()}`),
+  }));
 
 async function mintInfo(mint: PublicKey) {
   const i = await conn.getAccountInfo(mint);
@@ -585,28 +647,40 @@ async function buildSeedPool(payer: PublicKey, poolId: PublicKey, sol: number, r
   };
 }
 
-/** Curve config + UP curve + DOWN curve + market: the /new page's four transactions. `keys` lets a half-done listing resume. */
+/** Curve config + UP curve + DOWN curve + market: the /new page's four transactions. `keys` lets a half-done listing resume.
+ *  `q` is a mint or a pool on any venue (Raydium CLMM/CPMM, PumpSwap, Meteora DAMM v2/DLMM); a pool pins the oracle to it. */
 async function buildCreateMarket(payer: PublicKey, q: string, windowSecs: number, keysIn: { bull: string; bear: string; config: string } | undefined, force: boolean) {
   const info = await conn.getAccountInfo(new PublicKey(q));
   if (!info) throw new Error("no account at that address");
   let mint: PublicKey;
   let pinned: PublicKey | null = null;
-  if (info.owner.equals(RAYDIUM_CLMM)) {
-    const m0 = new PublicKey(info.data.subarray(73, 105)), m1 = new PublicKey(info.data.subarray(105, 137));
-    mint = quoteSymbolOf(m0) !== "?" ? m1 : m0;
+  const vp = decodeVenuePool(new PublicKey(q), info.owner, info.data);
+  if (vp) {
+    mint = quoteSymbolOf(vp.mint0) !== "?" ? vp.mint1 : vp.mint0;
     pinned = new PublicKey(q);
   } else if (info.data.length >= 82) mint = new PublicKey(q);
-  else throw new Error("that is neither a token mint nor a Raydium CLMM pool");
+  else throw new Error("that is neither a token mint nor a pool (Raydium CLMM/CPMM, PumpSwap, Meteora DAMM v2/DLMM)");
   if (!(windowSecs >= 600 && windowSecs <= 86_400)) throw new Error("window must be 600–86400 seconds (default 3960)");
-  const rows = await oracleCandidates(mint);
-  const pool = pinned ? rows.find((r) => r.id.equals(pinned!)) : rows[0];
-  if (!pool) throw new Error("no Raydium CLMM pool against SOL/USDC/USDT for this coin — create-pool first");
-  if (!pool.health?.ok && !force) throw new Error(`oracle pool ${pool.id.toBase58()} has only ${pool.health?.observations ?? 0} observations; trade it a little and wait, or pass force:true`);
+  const rows = await oracleCandidates(mint, pinned ?? undefined);
+  const pool = pinned ? rows.find((r) => r.pool.equals(pinned!)) : rows[0];
+  if (!pool) throw new Error(pinned ? "that pool is not quoted in SOL/USDC/USDT (or does not hold this coin)" : "no pool against SOL/USDC/USDT for this coin on Raydium (CLMM/CPMM), PumpSwap or Meteora (DAMM v2/DLMM) — create-pool first");
+  if (!pool.usable && !force) {
+    throw new Error(
+      pool.venue === "clmm"
+        ? `oracle pool ${pool.pool.toBase58()} has only ${pool.health?.observations ?? 0} observations; trade it a little and wait, or pass force:true`
+        : `${VENUE_LABEL[pool.venue]} pool ${pool.pool.toBase58()} holds no reserves; pass force:true to list anyway`,
+    );
+  }
   const kp = keysIn
     ? { bull: Keypair.fromSecretKey(bs58.decode(keysIn.bull)), bear: Keypair.fromSecretKey(bs58.decode(keysIn.bear)), config: Keypair.fromSecretKey(bs58.decode(keysIn.config)) }
     : { bull: Keypair.generate(), bear: Keypair.generate(), config: Keypair.generate() };
-  const flag = pool.mint0.equals(mint) ? 1 : 0;
-  const keys: MarketKeys = { key: marketPda(kp.bull.publicKey, kp.bear.publicKey, pool.obs, windowSecs, flag), bullMint: kp.bull.publicKey, bearMint: kp.bear.publicKey, oraclePool: pool.id, oracleObs: pool.obs, windowSecs, underlyingIsToken0: flag, config: kp.config.publicKey };
+  const flag = pool.flag;
+  // the market PDA commits to the oracle_obs slot (CLMM ring / PumpSwap base ATA / CPMM token-0 vault / Meteora pool); kinds 1/2 pass the venue pool as the trailing account
+  const keys: MarketKeys = {
+    key: marketPda(kp.bull.publicKey, kp.bear.publicKey, pool.slotObs, windowSecs, flag), bullMint: kp.bull.publicKey, bearMint: kp.bear.publicKey,
+    oraclePool: pool.slotPool, oracleObs: pool.slotObs, windowSecs, underlyingIsToken0: flag, config: kp.config.publicKey,
+    oracleKind: pool.kind, venuePool: pool.kind === 1 || pool.kind === 2 ? pool.pool : undefined,
+  };
   const exists = await conn.getMultipleAccountsInfo([kp.config.publicKey, sideAccounts(keys, 0).pool, sideAccounts(keys, 1).pool, keys.key]);
   if (exists[3]) throw new Error(`that market already exists: ${SITE}/m/${keys.key.toBase58()}`);
   const bal = await balance(payer);
@@ -621,7 +695,11 @@ async function buildCreateMarket(payer: PublicKey, q: string, windowSecs: number
   const txs: string[] = [];
   const steps: string[] = [];
   const outKeys = { bull: bs58.encode(kp.bull.secretKey), bear: bs58.encode(kp.bear.secretKey), config: bs58.encode(kp.config.secretKey) };
-  const summary = { kind: "create-market", mint: um, oracle_pool: pool.id.toBase58(), observation: pool.obs.toBase58(), quote: pool.quote, window_secs: windowSecs, market: keys.key.toBase58(), up_mint: keys.bullMint.toBase58(), down_mint: keys.bearMint.toBase58(), url: `${SITE}/m/${keys.key.toBase58()}` };
+  const summary = {
+    kind: "create-market", mint: um, venue: pool.venue, venue_label: VENUE_LABEL[pool.venue], oracle_kind: pool.kind, venue_pool: pool.pool.toBase58(),
+    oracle_pool: pool.slotPool.toBase58(), observation: pool.slotObs.toBase58(), quote: pool.quote, window_secs: windowSecs,
+    market: keys.key.toBase58(), up_mint: keys.bullMint.toBase58(), down_mint: keys.bearMint.toBase58(), url: `${SITE}/m/${keys.key.toBase58()}`,
+  };
   // each round builds what can be built now; the curve SDK reads the config on chain, the market needs the curves on chain
   if (!exists[0]) {
     const tx = await dbc.partner.createConfigWithTransferHook({ ...marketCurve(), config: kp.config.publicKey, feeClaimer: keys.key, leftoverReceiver: payer, quoteMint: RFSTACC, payer, transferHookProgram: PROGRAM_ID } as any);

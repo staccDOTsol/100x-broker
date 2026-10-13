@@ -43,6 +43,7 @@ export function globalAccounts(p: Pool, meme?: PublicKey): PublicKey[] {
 /** Everything a buy/sell/redeem/settle/claim on one market touches. */
 export function marketAccounts(m: Market): PublicKey[] {
   const out = [m.key, m.bullMint, m.bearMint, m.oraclePool, m.oracleObs, m.config];
+  if (m.venuePool) out.push(m.venuePool); // kind 1: the PumpSwap Pool rides along on every poke/settle/redeem
   for (const side of [0, 1]) {
     const a = sideAccounts(m, side);
     out.push(a.pool, a.baseVault, a.quoteVault, a.escrow, a.vault, a.meta);
