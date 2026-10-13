@@ -38,13 +38,23 @@ const EST_RENT_SOL = 0.04;
 const CURVE_FEE_BPS = 400;
 
 /** Raydium v3: CLMM pools containing this mint, deepest first. Filtered to SOL/USDC/USDT quotes. */
+const QUOTE_MINTS = ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"];
 async function raydiumPools(mint: PublicKey): Promise<Omit<PoolRow, "obs" | "health">[]> {
-  const u = `https://api-v3.raydium.io/pools/info/mint?mint1=${mint.toBase58()}&poolType=concentrated&poolSortField=liquidity&sortType=desc&pageSize=12&page=1`;
-  const r = await fetch(u);
-  if (!r.ok) throw new Error("Raydium API unavailable");
-  const j = await r.json();
+  // one query per quote: a coin with many meme/meme CLMM pairs pushes its SOL/USDC pools off a liquidity-sorted first page
+  const pages = await Promise.all(
+    QUOTE_MINTS.map(async (q) => {
+      const u = `https://api-v3.raydium.io/pools/info/mint?mint1=${mint.toBase58()}&mint2=${q}&poolType=concentrated&poolSortField=liquidity&sortType=desc&pageSize=12&page=1`;
+      const r = await fetch(u);
+      if (!r.ok) throw new Error("Raydium API unavailable");
+      const j = await r.json();
+      return (j?.data?.data ?? []) as any[];
+    }),
+  );
+  const seen = new Set<string>();
   const rows: Omit<PoolRow, "obs" | "health">[] = [];
-  for (const p of j?.data?.data ?? []) {
+  for (const p of pages.flat()) {
+    if (seen.has(p.id)) continue;
+    seen.add(p.id);
     if (p.programId !== RAYDIUM_CLMM.toBase58()) continue;
     const mint0 = new PublicKey(p.mintA.address);
     const mint1 = new PublicKey(p.mintB.address);
@@ -53,7 +63,7 @@ async function raydiumPools(mint: PublicKey): Promise<Omit<PoolRow, "obs" | "hea
     if (quote === "?") continue;
     rows.push({ id: new PublicKey(p.id), mint0, mint1, quote, tvl: Number(p.tvl ?? 0), volume24h: Number(p.day?.volume ?? 0) });
   }
-  return rows;
+  return rows.sort((a, b) => b.tvl - a.tvl);
 }
 
 /** Resolve a pasted address: a mint, or a CLMM pool (then the non-quote side is the underlying). */

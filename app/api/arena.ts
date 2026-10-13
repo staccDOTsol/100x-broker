@@ -760,7 +760,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         const all = await markets();
         return res.setHeader("cache-control", "no-store").json(await book(owner, all, p, await vaults()));
       }
-      return res.setHeader("cache-control", "public, max-age=10, s-maxage=15, stale-while-revalidate=60").json(await board());
+      return res.setHeader("cache-control", "public, max-age=10, s-maxage=60, stale-while-revalidate=600").json(await board());
     }
     if (req.method !== "POST") return res.status(405).json({ error: "GET or POST" });
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body ?? {};
