@@ -1,0 +1,68 @@
+{
+  "functions": {
+    "api/og.ts": {
+      "includeFiles": "api/_fonts/**",
+      "maxDuration": 30,
+      "memory": 1024
+    },
+    "api/page.ts": {
+      "includeFiles": "api/_fonts/**",
+      "maxDuration": 15
+    },
+    "api/feed.ts": {
+      "maxDuration": 30,
+      "memory": 1024
+    },
+    "api/leaders.ts": {
+      "maxDuration": 30,
+      "memory": 1024
+    },
+    "api/dnfeed.ts": {
+      "maxDuration": 30,
+      "memory": 1024
+    },
+    "api/ref.ts": {
+      "maxDuration": 30,
+      "memory": 1024
+    },
+    "api/arena.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "api/markets.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "api/winners.ts": {
+      "includeFiles": "api/_data/**",
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/m/:key",
+      "destination": "/api/page?key=:key"
+    },
+    {
+      "source": "/p/:wallet",
+      "destination": "/api/page?owner=:wallet"
+    },
+    {
+      "source": "/yield/:vault",
+      "destination": "/api/page?vault=:vault"
+    },
+    {
+      "source": "/meta",
+      "destination": "/api/page?meta=1"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

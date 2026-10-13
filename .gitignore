@@ -1,0 +1,17 @@
+target/
+scripts/node_modules/
+scripts/test-payer.json
+*.log
+scripts/keeper.json
+# secrets: keypairs and env
+scripts/market-keys-*.json
+scripts/fork-keys-*.json
+*.keypair.json
+.env
+.env.local
+.env.*.local
+# build / tooling
+node_modules/
+app/dist/
+app/.vercel/
+.DS_Store

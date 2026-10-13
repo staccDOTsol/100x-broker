@@ -1,0 +1,20 @@
+app = "hundredx-keeper"
+primary_region = "iad"
+
+[build]
+
+[env]
+  DN_PROGRAM_ID = "2ZbjE44nSh3AmpREg4sdNMViBLAzAEtFKYDn1XdqMzEj"
+  LOOP_MS = "30000"
+  MEME_MINT = "Fr28jEWz2msSCKLaHzus2nCKrwqbpTx2EyDYtsVVpump"
+  MIN_BURN_LST = "50000"
+  MIN_DEPLOY_SOL = "0.02"
+  MIN_SWEEP_LST = "2000000"
+
+[processes]
+  keeper = "bash start.sh"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "1gb"
+  processes = ["keeper"]

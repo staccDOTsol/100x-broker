@@ -1,0 +1,244 @@
+{
+  "address": "2ZbjE44nSh3AmpREg4sdNMViBLAzAEtFKYDn1XdqMzEj",
+  "metadata": {
+    "name": "dnvault",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Delta-neutral LP vaults on 100x.broker: LP a coin against SOL on its Raydium CLMM, hedge the coin leg with -100x DOWN sized to exposure/100, keep the fees. Receipt shares are SPL tokens priced at NAV. Keeper proposes allowlisted CPIs; the program verifies no value leak and the hedge got no worse, then pays the keeper. Written in Pinocchio; instruction discriminators are one byte.",
+    "repository": "https://100x.broker"
+  },
+  "instructions": [
+    {
+      "name": "create_vault",
+      "docs": ["Permissionless. One vault per (market, tick range). Token accounts are plain ATAs: WSOL and X under the SOL sub-account, quote and DOWN under the vault."],
+      "discriminator": [0],
+      "accounts": [
+        { "name": "creator", "writable": true, "signer": true },
+        { "name": "vault", "writable": true, "pda": { "seeds": [{ "kind": "const", "value": [118, 97, 117, 108, 116] }, { "kind": "account", "path": "market" }, { "kind": "arg", "path": "tick_lower" }, { "kind": "arg", "path": "tick_upper" }] } },
+        { "name": "share_mint", "writable": true, "pda": { "seeds": [{ "kind": "const", "value": [115, 104, 97, 114, 101, 115] }, { "kind": "account", "path": "vault" }] } },
+        { "name": "sol_pda", "writable": true, "pda": { "seeds": [{ "kind": "const", "value": [115, 111, 108] }, { "kind": "account", "path": "vault" }] } },
+        { "name": "market", "docs": ["hooked Market"] },
+        { "name": "clmm_pool", "docs": ["the market's oracle pool (Raydium CLMM)"] },
+        { "name": "x_mint" },
+        { "name": "down_mint", "docs": ["the market's bear mint"] },
+        { "name": "vault_wsol_ata", "docs": ["ATA(WSOL, sol_pda)"] },
+        { "name": "vault_x_ata", "docs": ["ATA(x_mint, sol_pda) under the mint's token program"] },
+        { "name": "vault_quote_ata", "docs": ["ATA(r-fstacc, vault)"] },
+        { "name": "vault_down_ata", "docs": ["ATA(down_mint, vault) under Token-2022"] },
+        { "name": "system_program", "address": "11111111111111111111111111111111" },
+        { "name": "token_program", "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" }
+      ],
+      "args": [
+        { "name": "tick_lower", "type": "i32" },
+        { "name": "tick_upper", "type": "i32" },
+        { "name": "band_bps", "type": "u16" },
+        { "name": "max_loss_bps", "type": "u16" },
+        { "name": "keeper_bps", "type": "u16" }
+      ]
+    },
+    {
+      "name": "deposit",
+      "docs": ["SOL in, shares out at NAV (1:1 for the first deposit). Rejected while a rebalance snapshot is open."],
+      "discriminator": [1],
+      "accounts": [
+        { "name": "user", "writable": true, "signer": true },
+        { "name": "vault", "writable": true },
+        { "name": "share_mint", "writable": true },
+        { "name": "user_share_ata", "writable": true },
+        { "name": "market" },
+        { "name": "market_vault_bear" },
+        { "name": "bear_mint" },
+        { "name": "dbc_base_vault_bear" },
+        { "name": "vault_down_ata" },
+        { "name": "clmm_pool" },
+        { "name": "position", "docs": ["the bound Raydium personal position, or the vault itself when none"] },
+        { "name": "vault_wsol_ata" },
+        { "name": "vault_x_ata" },
+        { "name": "vault_quote_ata" },
+        { "name": "stake_pool", "address": "SzoSoRxsrL9sbFcwpbjbH5bRrzuvFtuytZTeuqZCfQ6" },
+        { "name": "sol_pda", "writable": true },
+        { "name": "system_program", "address": "11111111111111111111111111111111" },
+        { "name": "token_program", "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" }
+      ],
+      "args": [{ "name": "lamports", "type": "u64" }]
+    },
+    {
+      "name": "withdraw",
+      "docs": ["Burn shares, receive the pro-rata slice of everything in kind: SOL, WSOL, quote, X, DOWN (transfer hook accounts forwarded), and the position via decrease_liquidity_v2 paid straight to the user."],
+      "discriminator": [2],
+      "accounts": [
+        { "name": "user", "writable": true, "signer": true },
+        { "name": "vault", "writable": true },
+        { "name": "share_mint", "writable": true },
+        { "name": "user_share_ata", "writable": true },
+        { "name": "market" },
+        { "name": "market_vault_bear" },
+        { "name": "bear_mint" },
+        { "name": "dbc_base_vault_bear" },
+        { "name": "vault_down_ata", "writable": true },
+        { "name": "clmm_pool" },
+        { "name": "position" },
+        { "name": "vault_wsol_ata", "writable": true },
+        { "name": "vault_x_ata", "writable": true },
+        { "name": "vault_quote_ata", "writable": true },
+        { "name": "stake_pool", "address": "SzoSoRxsrL9sbFcwpbjbH5bRrzuvFtuytZTeuqZCfQ6" },
+        { "name": "sol_pda", "writable": true },
+        { "name": "user_wsol_ata", "writable": true },
+        { "name": "user_quote_ata", "writable": true },
+        { "name": "user_x_ata", "writable": true },
+        { "name": "user_down_ata", "writable": true },
+        { "name": "token_program", "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" },
+        { "name": "token_2022_program", "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" },
+        { "name": "system_program", "address": "11111111111111111111111111111111" },
+        { "name": "x_mint" }
+      ],
+      "args": [
+        { "name": "shares", "type": "u64" },
+        { "name": "n_hook_accounts", "type": "u8", "docs": ["how many transfer-hook accounts follow x_mint; then (optional) clmm program + decrease_liquidity_v2 accounts"] }
+      ]
+    },
+    {
+      "name": "act",
+      "docs": ["Keeper action: forward one allowlisted instruction (Raydium CLMM open/increase/decrease/swap/close, DBC swap2_with_transfer_hook on the bear pool, hooked redeem side 1, stake pool DepositSol/WithdrawSol pinned to the vault's accounts) signed by the vault PDA and its SOL sub-account. The first act in a transaction snapshots NAV, hedge error, D and fees owed and requires a settle for this vault later in the same transaction. Data after the tag is the inner instruction data verbatim."],
+      "discriminator": [3],
+      "accounts": [
+        { "name": "vault", "writable": true },
+        { "name": "instructions_sysvar", "address": "Sysvar1nstructions1111111111111111111111111" },
+        { "name": "target_program" },
+        { "name": "market" },
+        { "name": "market_vault_bear" },
+        { "name": "bear_mint" },
+        { "name": "dbc_base_vault_bear" },
+        { "name": "vault_down_ata", "writable": true },
+        { "name": "clmm_pool" },
+        { "name": "position" },
+        { "name": "vault_wsol_ata", "writable": true },
+        { "name": "vault_x_ata", "writable": true },
+        { "name": "vault_quote_ata", "writable": true },
+        { "name": "stake_pool", "address": "SzoSoRxsrL9sbFcwpbjbH5bRrzuvFtuytZTeuqZCfQ6" },
+        { "name": "sol_pda", "writable": true }
+      ],
+      "args": [{ "name": "inner_data", "type": "bytes" }]
+    },
+    {
+      "name": "settle",
+      "docs": ["Closes a rebalance: NAV >= snapshot * (1 - max_loss_bps) and hedge error <= band_bps or no worse than the snapshot. Pays the keeper keeper_bps of |ΔD| + harvested fees from the SOL sub-account."],
+      "discriminator": [4],
+      "accounts": [
+        { "name": "vault", "writable": true },
+        { "name": "keeper", "writable": true, "signer": true },
+        { "name": "system_program", "address": "11111111111111111111111111111111" },
+        { "name": "market" },
+        { "name": "market_vault_bear" },
+        { "name": "bear_mint" },
+        { "name": "dbc_base_vault_bear" },
+        { "name": "vault_down_ata", "writable": true },
+        { "name": "clmm_pool" },
+        { "name": "position" },
+        { "name": "vault_wsol_ata", "writable": true },
+        { "name": "vault_x_ata", "writable": true },
+        { "name": "vault_quote_ata", "writable": true },
+        { "name": "stake_pool", "address": "SzoSoRxsrL9sbFcwpbjbH5bRrzuvFtuytZTeuqZCfQ6" },
+        { "name": "sol_pda", "writable": true }
+      ],
+      "args": []
+    },
+    {
+      "name": "wrap",
+      "docs": ["Move SOL from the sub-account into the vault's WSOL account."],
+      "discriminator": [5],
+      "accounts": [
+        { "name": "vault" },
+        { "name": "sol_pda", "writable": true },
+        { "name": "vault_wsol_ata", "writable": true },
+        { "name": "system_program", "address": "11111111111111111111111111111111" },
+        { "name": "token_program", "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" }
+      ],
+      "args": [{ "name": "lamports", "type": "u64" }]
+    },
+    {
+      "name": "unwrap",
+      "docs": ["Close the WSOL account back into the SOL sub-account."],
+      "discriminator": [6],
+      "accounts": [
+        { "name": "vault" },
+        { "name": "sol_pda", "writable": true },
+        { "name": "vault_wsol_ata", "writable": true },
+        { "name": "token_program", "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" }
+      ],
+      "args": []
+    },
+    {
+      "name": "bind_position",
+      "docs": ["Pin the vault's Raydium position (NFT must sit in a sub-account-owned token account, pool and range must match). Pass the vault as `position` and the closed position account as `nft_account` to unpin."],
+      "discriminator": [7],
+      "accounts": [
+        { "name": "vault", "writable": true },
+        { "name": "position" },
+        { "name": "nft_account" }
+      ],
+      "args": []
+    }
+  ],
+  "accounts": [{ "name": "Vault", "discriminator": [100, 110, 118, 97, 117, 108, 116, 49] }],
+  "errors": [
+    { "code": 0, "name": "InvalidVault" },
+    { "code": 1, "name": "InvalidMarket" },
+    { "code": 2, "name": "InvalidPool" },
+    { "code": 3, "name": "InvalidAccount" },
+    { "code": 4, "name": "InvalidProgram" },
+    { "code": 5, "name": "MissingSigner" },
+    { "code": 6, "name": "ZeroAmount" },
+    { "code": 7, "name": "MathOverflow" },
+    { "code": 8, "name": "NotAllowlisted" },
+    { "code": 9, "name": "SettleMissing", "msg": "an act needs a settle for the same vault later in the transaction" },
+    { "code": 10, "name": "NoSnapshot" },
+    { "code": 11, "name": "SnapshotActive", "msg": "deposit/withdraw while a rebalance is open" },
+    { "code": 12, "name": "ValueLeaked", "msg": "NAV dropped more than max_loss_bps in this rebalance" },
+    { "code": 13, "name": "HedgeWorse", "msg": "hedge error outside the band and worse than before" },
+    { "code": 14, "name": "PriceSanity", "msg": "pool sqrt price disagrees with its tick" },
+    { "code": 15, "name": "PositionMismatch" },
+    { "code": 16, "name": "NoShares" },
+    { "code": 17, "name": "InvalidTick" }
+  ],
+  "types": [
+    {
+      "name": "Vault",
+      "docs": ["488 bytes, repr(C). Discriminator \"dnvault1\"."],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "market", "type": "pubkey" },
+          { "name": "pool", "type": "pubkey" },
+          { "name": "x_mint", "type": "pubkey" },
+          { "name": "down_mint", "type": "pubkey" },
+          { "name": "share_mint", "type": "pubkey" },
+          { "name": "wsol_ata", "type": "pubkey" },
+          { "name": "x_ata", "type": "pubkey" },
+          { "name": "quote_ata", "type": "pubkey" },
+          { "name": "down_ata", "type": "pubkey" },
+          { "name": "position", "type": "pubkey" },
+          { "name": "position_nft", "type": "pubkey" },
+          { "name": "creator", "type": "pubkey" },
+          { "name": "sol_pda", "type": "pubkey" },
+          { "name": "snap_nav", "type": "u64" },
+          { "name": "snap_err_bps", "type": "u64" },
+          { "name": "snap_slot", "type": "u64" },
+          { "name": "snap_d", "type": "u64" },
+          { "name": "snap_fees", "type": "u64" },
+          { "name": "tick_lower", "type": "i32" },
+          { "name": "tick_upper", "type": "i32" },
+          { "name": "band_bps", "type": "u16" },
+          { "name": "max_loss_bps", "type": "u16" },
+          { "name": "keeper_bps", "type": "u16" },
+          { "name": "bump", "type": "u8" },
+          { "name": "x_is_token0", "type": "u8" },
+          { "name": "snap_active", "type": "u8" },
+          { "name": "sol_bump", "type": "u8" },
+          { "name": "x_is_t22", "type": "u8" },
+          { "name": "padding", "type": { "array": ["u8", 5] } }
+        ]
+      }
+    }
+  ]
+}
