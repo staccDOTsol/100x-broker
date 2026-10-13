@@ -246,13 +246,33 @@ async function meteoraRows(mint: PublicKey, host: "damm-v2" | "dlmm", venue: Ven
     .filter((p) => p?.address && (p.token_x?.address === m || p.token_y?.address === m) && !p.is_blacklisted)
     .map((p) => ({ id: new PublicKey(p.address), venue, tvl: Number(p.tvl ?? 0), volume24h: Number(p.volume?.["24h"] ?? 0) }));
 }
-/** PumpSwap: the canonical pool is a PDA; swap-api adds liquidityUSD when reachable (it publishes no volume). */
+/** PumpSwap: every pool swap-api knows for the pair (anyone can open a PumpSwap pool, and older coins such as MOBY live in
+ *  user-created ones), plus the canonical migration PDA in case the API is down or lags. swap-api publishes liquidityUSD
+ *  but no volume. Each candidate is still fetched and decoded on-chain afterwards, so a bad API row cannot get through. */
 async function pumpSwapRows(mint: PublicKey): Promise<ApiRow[]> {
-  const pool = pumpSwapCanonicalPool(mint);
-  const j = await fetchJson(`https://swap-api.pump.fun/v1/pools/pair?mintA=${mint.toBase58()}&mintB=${WSOL.toBase58()}`).catch(() => null);
-  const hit = Array.isArray(j) ? j.find((p: any) => p?.address === pool.toBase58()) : null;
-  const tvl = hit ? Number(hit.liquidityUSD) : NaN;
-  return [{ id: pool, venue: "pumpswap", tvl: Number.isFinite(tvl) ? tvl : null, volume24h: null }];
+  const canonical = pumpSwapCanonicalPool(mint);
+  const rows = new Map<string, ApiRow>();
+  rows.set(canonical.toBase58(), { id: canonical, venue: "pumpswap", tvl: null, volume24h: null });
+  const lists = await Promise.all(
+    [WSOL, new PublicKey(USDC)].map((q) =>
+      fetchJson(`https://swap-api.pump.fun/v1/pools/pair?mintA=${mint.toBase58()}&mintB=${q.toBase58()}`).catch(() => null),
+    ),
+  );
+  for (const j of lists) {
+    if (!Array.isArray(j)) continue;
+    for (const p of j) {
+      if (typeof p?.address !== "string") continue;
+      let id: PublicKey;
+      try {
+        id = new PublicKey(p.address);
+      } catch {
+        continue;
+      }
+      const tvl = Number(p.liquidityUSD);
+      rows.set(id.toBase58(), { id, venue: "pumpswap", tvl: Number.isFinite(tvl) ? tvl : null, volume24h: null });
+    }
+  }
+  return [...rows.values()];
 }
 
 /**
