@@ -77,9 +77,15 @@ export function Sparkline({
   if (pts.length < 2) return <span className={`spark empty ${className}`} aria-hidden style={{ width: w, height: h }} />;
   const base = refPrice ?? pts[0].price;
   const prices = pts.map((p) => p.price).concat(base);
-  const lo = Math.min(...prices);
-  const hi = Math.max(...prices);
-  const span = hi - lo || hi * 1e-6 || 1;
+  let lo = Math.min(...prices);
+  let hi = Math.max(...prices);
+  // a flat window (no tick yet) would land on the bottom edge and vanish; give it ±0.5% of headroom so the line sits mid-chart
+  if (hi - lo <= Math.abs(hi) * 1e-9) {
+    const mid = hi || 1;
+    lo = mid * 0.995;
+    hi = mid * 1.005;
+  }
+  const span = hi - lo || 1;
   const t0 = pts[0].ts;
   const t1 = pts[pts.length - 1].ts;
   const x = (ts: number) => pad + ((ts - t0) / Math.max(1, t1 - t0)) * (w - pad * 2);
