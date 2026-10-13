@@ -2485,9 +2485,15 @@ a.owed:hover {
   display: flex;
   gap: 6px;
 }
-.chip[aria-pressed="true"] {
+.chip[aria-pressed="true"],
+.chip[aria-checked="true"] {
   border-color: var(--ink);
-  color: var(--ink);
+  color: var(--paper);
+  background: var(--ink);
+}
+.chip[aria-checked="true"] .muted {
+  color: var(--paper);
+  opacity: 0.7;
 }
 .roll {
   display: inline-block;
@@ -4060,3 +4066,24 @@ details.math summary { cursor: pointer; color: var(--ink-3); }
 }
 .runners-cta { color: var(--signal-ink); text-decoration: none; border-bottom: 1px dotted currentColor; }
 .runners-cta:hover { color: var(--ink); }
+
+/* ---- venues ---- */
+.venue-badge { display: inline-block; padding: 1px 7px; margin-right: 8px; border: 1px solid var(--rule); border-radius: 999px; font: 600 0.68rem var(--font-body); letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-3); vertical-align: middle; white-space: nowrap; }
+.pool[aria-checked="true"] .venue-badge { border-color: var(--ink-3); color: var(--ink); }
+.venue-badge[data-venue="pumpswap"] { border-color: color-mix(in oklab, var(--up) 55%, transparent); }
+.venue-badge[data-venue="cpmm"], .venue-badge[data-venue="clmm"] { border-color: color-mix(in oklab, var(--signal) 55%, transparent); }
+.venue-badge[data-venue="dammv2"], .venue-badge[data-venue="dlmm"] { border-color: color-mix(in oklab, var(--down) 45%, transparent); }
+.pool.venue-row { grid-template-columns: minmax(0, 1.9fr) 1fr 1fr 1.5fr; }
+.pool.venue-row .pool-pair { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 720px) { .pool.venue-row { grid-template-columns: 1fr 1fr; } .pool.venue-row .pool-pair { grid-column: 1 / -1; white-space: normal; } }
+/* ---- runner picks (/new) ---- */
+.picks { display: grid; gap: 6px; margin-top: 10px; }
+.picks-head { display: flex; align-items: center; gap: 6px; color: var(--ink-3); }
+.picks-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.pick { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px 4px 5px; border: 1px solid var(--rule); border-radius: 999px; background: var(--paper); color: var(--ink); font: 600 var(--t-small) var(--font-mono); cursor: pointer; transition: border-color var(--t-fast), background var(--t-fast); }
+.pick:hover { border-color: var(--signal); background: color-mix(in oklch, var(--signal) 14%, transparent); }
+.pick.pump { border-color: color-mix(in oklch, var(--signal) 55%, var(--rule)); }
+.pick .tokimg { width: 16px; height: 16px; margin: 0; border-radius: 50%; }
+.pick b { font-weight: 800; }
+.pick.top { border-color: var(--signal); background: color-mix(in oklch, var(--signal) 18%, transparent); }
+.pick .muted { color: var(--ink-3); font-weight: 500; }
