@@ -12,6 +12,7 @@ import { usePrices } from "../hooks/price";
 import { useToasts } from "../components/Toasts";
 import { CardShare } from "../components/Share";
 import { RunnerPicks } from "../components/RunnerPicks";
+import { TokenSearch } from "../components/TokenSearch";
 import { ago, lev, pct, short } from "../lib/format";
 import { getDerivedMeta, getUnderlying, metaUri, type DerivedMeta, type Underlying } from "../lib/das";
 import { shareUrl, tweetUrl } from "../lib/ref";
@@ -327,12 +328,13 @@ export default function NewMarket() {
                   id="ca"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
-                  placeholder="pumpCmXq…  or  45ssPkUQ…"
+                  placeholder="name, ticker, CA or pool"
                   spellCheck={false}
                   autoComplete="off"
                 />
               </div>
               {inputErr && <span className="err">{inputErr}</span>}
+              <TokenSearch text={input} onPick={setInput} />
               {under && (
                 <div className="asset">
                   {under.image && <img className="tokimg" src={under.image} alt="" />}
