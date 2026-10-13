@@ -5,6 +5,7 @@ import { usePoll } from "../hooks";
 import { Delta } from "./Pulse";
 import { Tweet } from "./Share";
 import { lev } from "../lib/format";
+import { VENUE_LABEL, type Venue } from "../lib/venues";
 
 type Runner = {
   mint: string;
@@ -19,12 +20,14 @@ type Runner = {
   rank: number | null;
   pump: boolean;
   market: { key: string; levUp: number | null; levDown: number | null } | null;
-  listable: { id: string; quote: string; tvl: number } | null;
-  venue_hint: "clmm" | "pumpswap" | null;
+  listable: { id: string; venue: Venue; quote: string; tvl: number } | null;
+  venue_hint: Venue | null;
 };
 type Payload = { at?: number; runners?: Runner[]; error?: string };
 
 const MAX = 16;
+/** Below this much depth the oracle is cheap to push; /new drops such pools, here the label says so instead of "LFG". */
+const THIN_USD = 10;
 
 async function fetchRunners(): Promise<Runner[]> {
   const r = await fetch("/api/runners");
@@ -96,11 +99,9 @@ function RunnerCard({ r }: { r: Runner }) {
           Trade · UP {levOf(r.market.levUp)}
         </Link>
       ) : r.listable ? (
-        <Link className="runner-act go list" to={path} title={`Raydium CLMM vs ${r.listable.quote} · $${Math.round(r.listable.tvl).toLocaleString("en-US")} TVL`}>
-          List ${r.symbol} · LFG
+        <Link className="runner-act go list" to={path} title={`${VENUE_LABEL[r.listable.venue] ?? r.listable.venue} vs ${r.listable.quote} · $${Math.round(r.listable.tvl).toLocaleString("en-US")} depth`}>
+          List ${r.symbol} · {r.listable.tvl < THIN_USD ? "thin" : "LFG"}
         </Link>
-      ) : r.venue_hint === "pumpswap" ? (
-        <span className="runner-act off">soon · pumpswap</span>
       ) : (
         <span className="runner-act off">no oracle</span>
       )}

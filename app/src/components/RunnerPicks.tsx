@@ -11,7 +11,7 @@ async function fetchPicks(): Promise<Pick[]> {
   if (!r.ok) throw new Error(`runners ${r.status}`);
   const j = (await r.json()) as { runners?: Pick[] };
   return (j.runners ?? [])
-    .filter((p) => !p.market && (p.listable || p.venue_hint === "pumpswap"))
+    .filter((p) => !p.market && p.listable)
     .sort((a, b) => (b.vol24 ?? 0) - (a.vol24 ?? 0));
 }
 
