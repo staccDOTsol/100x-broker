@@ -19,7 +19,8 @@ export const QUOTE_DECIMALS = 9;
 export const QUOTE_SYMBOL = "r-fstacc";
 
 // browser: the key-hiding proxy; server (Vercel function): the upstream itself
-export const RPC_URL = typeof window !== "undefined" ? `${window.location.origin}/api/rpc` : process.env.FLUX_RPC_URLS?.split(",")[0]?.trim() || process.env.HELIUS_RPC_URL || "https://100x.broker/api/rpc";
+// Server side: Helius first (one URL, known-good); Flux keys rotate inside /api/rpc where a bad key can fall through. The shared `conn` has no fallback.
+export const RPC_URL = typeof window !== "undefined" ? `${window.location.origin}/api/rpc` : process.env.HELIUS_RPC_URL || process.env.FLUX_RPC_URLS?.split(",")[0]?.trim() || "https://100x.broker/api/rpc";
 export const NETWORK: "mainnet" | "fork" = (env.VITE_NETWORK as "fork") ?? "mainnet";
 export const POLL_MS = 10_000;
 /** Markets pinned as the board hero: first is the house coin (big), the rest sit beside it. */
