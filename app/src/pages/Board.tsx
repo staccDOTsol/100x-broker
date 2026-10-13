@@ -13,7 +13,7 @@ import { ActiveWallets, Feed, Wallets } from "../components/Live";
 import { CoinStrip } from "../components/Coin";
 import { Runners } from "../components/Runners";
 import { Delta, Flash, Rolling, Sparkline } from "../components/Pulse";
-import { ago, lev, short, usd, usdPrice } from "../lib/format";
+import { ago, lev, pct, short, usd, usdPrice } from "../lib/format";
 import { fetchFeed, fetchWinners, type Ev } from "../lib/feed";
 import { marketShare, useRefWallet } from "../components/Flex";
 import { CardShare, Tweet } from "../components/Share";
@@ -51,13 +51,40 @@ function movesByMarket(evs: Ev[] | undefined): Map<string, number> {
   return m;
 }
 
+// ---- hero fallback: when the house chart is flat, show whichever live market moved most over its loaded window ----
+const finitePrices = (v: MarketView) => v.oracle.series.map((p) => p.price).filter((p) => Number.isFinite(p) && p > 0);
+/** last/first − 1 of the oracle series the board already holds; 0 without two usable points. */
+function seriesMove(v: MarketView): number {
+  const ps = finitePrices(v);
+  return ps.length >= 2 ? ps[ps.length - 1] / ps[0] - 1 : 0;
+}
+/** Flat = fewer than 8 points, or a max/min spread under 0.2%: nothing to look at. */
+function flatSeries(v: MarketView): boolean {
+  const ps = finitePrices(v);
+  return ps.length < 8 || Math.max(...ps) / Math.min(...ps) - 1 < 0.002;
+}
+/** The market with the biggest |move| (ties: bigger pots); null when nothing moved at all, so the house chart stays. */
+function biggestMover(all: MarketView[], not: MarketView | undefined): { v: MarketView; move: number } | null {
+  const pot = (v: MarketView) => v.side[0].vault + v.side[1].vault;
+  let best: { v: MarketView; move: number } | null = null;
+  for (const v of all) {
+    if (v === not) continue;
+    const move = seriesMove(v);
+    if (!best || Math.abs(move) > Math.abs(best.move) || (Math.abs(move) === Math.abs(best.move) && pot(v) > pot(best.v))) best = { v, move };
+  }
+  return best && Math.abs(best.move) > 0 ? best : null;
+}
+
 export default function Board() {
   const { data, error, loading } = usePoll(loadBoard, []);
   const burn = usePoll(loadBurnPot, []);
   const feed = usePoll(() => fetchFeed(), [], 6_000);
   const [theme, setTheme] = useState<Theme>("all");
   const moves = useMemo(() => movesByMarket(feed.data), [feed.data]);
-  const hero = HERO_MARKETS.map((k) => data?.find((v) => v.acct.key.toBase58() === k)).find((v): v is MarketView => !!v) ?? data?.[0];
+  const house = HERO_MARKETS.map((k) => data?.find((v) => v.acct.key.toBase58() === k)).find((v): v is MarketView => !!v) ?? data?.[0];
+  // a flat $100XBRO chart hands the hero to the biggest mover on the board; it comes back the moment $100XBRO moves again
+  const mover = useMemo(() => (house && data && flatSeries(house) ? biggestMover(data, house) : null), [data, house]);
+  const hero = mover?.v ?? house;
   const cards = (data ?? [])
     .filter((v) => v !== hero && (theme === "all" || themeOf(v) === theme))
     .sort((a, b) => (moves.get(b.acct.key.toBase58()) ?? 0) - (moves.get(a.acct.key.toBase58()) ?? 0) || Number(b.side[0].vault + b.side[1].vault - (a.side[0].vault + a.side[1].vault)));
@@ -94,7 +121,7 @@ export default function Board() {
       </section>
 
       <section className="board-main">
-        {hero ? <Hero v={hero} house={hero.underlyingMint === MEME_MINT.toBase58()} moves={moves.get(hero.acct.key.toBase58()) ?? 0} /> : <div className="skeleton hero-skel" aria-hidden />}
+        {hero ? <Hero v={hero} house={hero.underlyingMint === MEME_MINT.toBase58()} moves={moves.get(hero.acct.key.toBase58()) ?? 0} mover={mover?.move ?? null} /> : <div className="skeleton hero-skel" aria-hidden />}
         <aside className="live-aside" aria-label="Live activity">
           <h2 className="meta">
             <span className="live-dot" aria-hidden />
@@ -263,8 +290,9 @@ function Rail({ markets, burnPot, feed }: { markets: MarketView[]; burnPot: bigi
   );
 }
 
-/** The hero: one market as a chart card. Price, change, the oracle drawn big, the pots, and two doors. */
-function Hero({ v, house, moves }: { v: MarketView; house: boolean; moves: number }) {
+/** The hero: one market as a chart card. Price, change, the oracle drawn big, the pots, and two doors.
+ *  `mover` is set (last/first − 1 of its series) when this market is here as the biggest mover instead of the house coin. */
+function Hero({ v, house, moves, mover = null }: { v: MarketView; house: boolean; moves: number; mover?: number | null }) {
   const key = v.acct.key.toBase58();
   const under = useUnderlying(v.underlyingMint);
   const px = usePrices();
@@ -277,7 +305,15 @@ function Hero({ v, house, moves }: { v: MarketView; house: boolean; moves: numbe
   return (
     <section className={`hero-card ${house ? "house" : ""}`} aria-label={`${ticker} market`}>
       <div className="hc-head">
-        <span className="meta hc-kicker">{house ? "The coin · 30% of every fee burns it" : "House special"} · Raydium TWAP · {Math.round(v.acct.windowSecs / 60)} min</span>
+        <span className="meta hc-kicker">
+          {mover !== null ? (
+            <>
+              ${ticker} · {mover >= 0 ? "+" : ""}{pct(mover)} · UP {lev(v.side[0].leverage)} <small className="meta">biggest mover</small>
+            </>
+          ) : (
+            `${house ? "The coin · 30% of every fee burns it" : "House special"} · Raydium TWAP · ${Math.round(v.acct.windowSecs / 60)} min`
+          )}
+        </span>
         <Link to={`/m/${key}`} className="display hc-ticker">
           {under?.image && <img className="tokimg hero-img" src={under.image} alt="" />}${ticker}
           <small className="hq">/ {v.oracle.quote}</small>

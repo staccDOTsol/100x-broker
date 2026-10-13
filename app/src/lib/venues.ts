@@ -248,7 +248,8 @@ async function meteoraRows(mint: PublicKey, host: "damm-v2" | "dlmm", venue: Ven
 }
 /** PumpSwap: every pool swap-api knows for the pair (anyone can open a PumpSwap pool, and older coins such as MOBY live in
  *  user-created ones), plus the canonical migration PDA in case the API is down or lags. swap-api publishes liquidityUSD
- *  but no volume. Each candidate is still fetched and decoded on-chain afterwards, so a bad API row cannot get through. */
+ *  but no volume: rows leave volume24h null and callers fill it from Birdeye (/api/poolvol, `patchPoolVolumes`) before
+ *  ranking. Each candidate is still fetched and decoded on-chain afterwards, so a bad API row cannot get through. */
 async function pumpSwapRows(mint: PublicKey): Promise<ApiRow[]> {
   const canonical = pumpSwapCanonicalPool(mint);
   const rows = new Map<string, ApiRow>();
@@ -324,6 +325,26 @@ export async function discoverPools(conn: Connection, mint: PublicKey, only?: Ve
     });
   });
   return out;
+}
+
+/** What /api/poolvol (Birdeye pair overview) knows about a pool: 24h USD volume and USD liquidity, null when it has nothing. */
+export type PoolVol = { vol24: number | null; liq: number | null };
+/** Pools whose venue API gave no volume (PumpSwap): what to ask /api/poolvol about, in batches of `size`. */
+export function poolsMissingVolume(cands: PoolCandidate[], size = 20): string[][] {
+  const ids = cands.filter((c) => c.volume24h === null).map((c) => c.pool.toBase58());
+  const out: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
+  return out;
+}
+/** Fill volume24h (and tvl, when the venue gave none) from Birdeye figures, in place. Only nulls are touched: a venue's own number wins. */
+export function patchPoolVolumes(cands: PoolCandidate[], vols: Record<string, PoolVol>): PoolCandidate[] {
+  for (const c of cands) {
+    const v = vols[c.pool.toBase58()];
+    if (!v) continue;
+    if (c.volume24h === null && v.vol24 !== null) c.volume24h = v.vol24;
+    if (c.tvl === null && v.liq !== null) c.tvl = v.liq;
+  }
+  return cands;
 }
 
 /** The quote the venue actually prices against: the reserve, plus PumpSwap's virtual quote. null = unusable (none, or
