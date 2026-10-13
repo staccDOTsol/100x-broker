@@ -135,9 +135,19 @@ export default function NewMarket() {
         const depth = (p: PoolRow) => candidateTvlUsd(p, solUsd) ?? 0;
         const vol = (p: PoolRow) => p.volume24h ?? 0;
         all.sort((a, b) => Number(usable(b)) - Number(usable(a)) || vol(b) - vol(a) || depth(b) - depth(a));
-        // five venues can mean dozens of dust pools: keep the ones with real liquidity (and whatever was pinned), a dozen at most
-        const live = all.filter((p) => depth(p) >= 10 || (wanted && p.pool.equals(wanted)));
-        const rows = (live.length ? live : all).slice(0, 12);
+        // five venues can mean dozens of dust pools: offer the pools that hold the top 70% of this coin's liquidity and drop the
+        // long tail (a thin oracle is the cheapest one to push). A pinned pool always stays; at least one pool survives.
+        const total = all.reduce((s, p) => s + depth(p), 0);
+        let cum = 0;
+        const byDepth = [...all].sort((a, b) => depth(b) - depth(a));
+        const keep = new Set<string>();
+        for (const p of byDepth) {
+          if (keep.size > 0 && cum >= total * 0.7) break;
+          keep.add(p.pool.toBase58());
+          cum += depth(p);
+        }
+        const live = all.filter((p) => (keep.has(p.pool.toBase58()) && depth(p) >= 10) || (wanted && p.pool.equals(wanted)));
+        const rows = (live.length ? live : all.slice(0, 1)).slice(0, 12);
         if (!alive) return;
         setUnder(asset ?? { mint: mint.toBase58(), name: short(mint.toBase58()), symbol: "TOKEN", image: null, decimals: 0 });
         setPools(rows);
