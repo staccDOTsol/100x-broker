@@ -135,18 +135,24 @@ export default function NewMarket() {
         const depth = (p: PoolRow) => candidateTvlUsd(p, solUsd) ?? 0;
         const vol = (p: PoolRow) => p.volume24h ?? 0;
         all.sort((a, b) => Number(usable(b)) - Number(usable(a)) || vol(b) - vol(a) || depth(b) - depth(a));
-        // five venues can mean dozens of dust pools: offer the pools that hold the top 70% of this coin's liquidity and drop the
-        // long tail (a thin oracle is the cheapest one to push). A pinned pool always stays; at least one pool survives.
-        const total = all.reduce((s, p) => s + depth(p), 0);
-        let cum = 0;
-        const byDepth = [...all].sort((a, b) => depth(b) - depth(a));
-        const keep = new Set<string>();
-        for (const p of byDepth) {
-          if (keep.size > 0 && cum >= total * 0.7) break;
-          keep.add(p.pool.toBase58());
-          cum += depth(p);
-        }
-        const live = all.filter((p) => (keep.has(p.pool.toBase58()) && depth(p) >= 10) || (wanted && p.pool.equals(wanted)));
+        // five venues can mean dozens of dust pools: a pool is offered if it sits in the top 80% of this coin's liquidity OR the
+        // top 80% of its 24h volume; the long tail on both counts is dropped (a thin oracle is the cheapest one to push).
+        // A pinned pool always stays; at least one pool survives.
+        const topShare = (score: (p: PoolRow) => number, share: number) => {
+          const total = all.reduce((s, p) => s + score(p), 0);
+          const keep = new Set<string>();
+          let cum = 0;
+          for (const p of [...all].sort((a, b) => score(b) - score(a))) {
+            if (keep.size > 0 && cum >= total * share) break;
+            if (score(p) <= 0) break;
+            keep.add(p.pool.toBase58());
+            cum += score(p);
+          }
+          return keep;
+        };
+        const byTvl = topShare(depth, 0.8);
+        const byVol = topShare(vol, 0.8);
+        const live = all.filter((p) => ((byTvl.has(p.pool.toBase58()) || byVol.has(p.pool.toBase58())) && depth(p) >= 10) || (wanted && p.pool.equals(wanted)));
         const rows = (live.length ? live : all.slice(0, 1)).slice(0, 12);
         if (!alive) return;
         setUnder(asset ?? { mint: mint.toBase58(), name: short(mint.toBase58()), symbol: "TOKEN", image: null, decimals: 0 });
