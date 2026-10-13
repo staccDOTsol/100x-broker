@@ -11,6 +11,7 @@ import { OraclePrice, Tug } from "../components/bits";
 import { useUnderlying } from "../hooks/underlying";
 import { ActiveWallets, Feed, Wallets } from "../components/Live";
 import { CoinStrip } from "../components/Coin";
+import { Runners } from "../components/Runners";
 import { Delta, Flash, Rolling, Sparkline } from "../components/Pulse";
 import { ago, lev, short, usd, usdPrice } from "../lib/format";
 import { fetchFeed, fetchWinners, type Ev } from "../lib/feed";
@@ -103,6 +104,8 @@ export default function Board() {
           <Feed limit={16} />
         </aside>
       </section>
+
+      <Runners />
 
       <div className="boards-head">
         <h2 className="display">Every board.</h2>
