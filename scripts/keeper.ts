@@ -10,8 +10,8 @@ import BN from "bn.js";
 import bs58 from "bs58";
 import fs from "fs";
 import {
-  PROGRAM_ID, PUMP, RFSTACC, burnMemeIx, burnStatePda, burnVaultPda, claimFeesIx, cu, memeVenue, pokeIx, settleBeginIx, settleEndIx,
-  sideAccounts, tokenBalance, type Market,
+  PROGRAM_ID, PUMP, RFSTACC, burnMemeIx, burnStatePda, burnVaultPda, claimFeesIx, cu, marketFromAccount, memeVenue, pokeIx, settleBeginIx, settleEndIx,
+  sideAccounts, tokenBalance, venueTick, type Market,
 } from "./lib";
 import { STAKE_POOL, readPool, withdrawSolIx } from "./stakepool";
 import { ensureAlts, globalAccounts, marketAccounts } from "./alt";
@@ -54,12 +54,8 @@ const u64 = (d: Buffer, o: number) => d.readBigUInt64LE(o);
 async function markets(): Promise<Market[]> {
   const res = await conn.getProgramAccounts(PROGRAM_ID, { filters: [{ dataSize: 1008 }] });
   const out: Market[] = [];
-  for (const { pubkey, account } of res) {
-    const d = account.data;
-    const pk = (o: number) => new PublicKey(d.subarray(o, o + 32));
-    const pool = await conn.getAccountInfo(pk(232));
-    out.push({ key: pubkey, bullMint: pk(8), bearMint: pk(40), oraclePool: pk(104), oracleObs: pk(136), windowSecs: d.readUInt32LE(480), underlyingIsToken0: d[489], config: new PublicKey(pool!.data.subarray(72, 104)) });
-  }
+  // oracle kind included; kind-1 (PumpSwap) markets get their Pool resolved (poke/settle pass it after the oracle_pool slot)
+  for (const { pubkey, account } of res) out.push(await marketFromAccount(conn, pubkey, account.data));
   return out;
 }
 
@@ -88,19 +84,38 @@ function twapNow(obs: Buffer, ckpts: Pt[], window: number, sample?: { now: numbe
   const start = best ?? oldest;
   return start.ts === end.ts ? null : { endTs: end.ts, twapQ32: ((end.tc - start.tc) << 32n) / BigInt(end.ts - start.ts) };
 }
+/** Kinds 1-4 (no ring anywhere): the newest checkpoint extended with the live tick to now, averaged back over the window (oracle.rs read_sampled). */
+function sampledTwapNow(ckpts: Pt[], window: number, now: number, tick: number) {
+  const valid = ckpts.filter((c) => c.ts > 0).sort((a, b) => b.ts - a.ts);
+  const newest = valid[0];
+  if (!newest || !Number.isFinite(tick)) return null;
+  const end: Pt = { ts: now, tc: newest.tc + BigInt(Math.round(tick)) * BigInt(Math.max(0, now - newest.ts)) };
+  const target = Math.max(0, end.ts - window);
+  let best: Pt | undefined;
+  let oldest = end;
+  for (const p of valid) {
+    if (p.ts > end.ts) continue;
+    if (p.ts <= target && (!best || p.ts > best.ts)) best = p;
+    if (p.ts < oldest.ts) oldest = p;
+  }
+  const start = best ?? oldest;
+  return start.ts === end.ts ? null : { endTs: end.ts, twapQ32: ((end.tc - start.tc) << 32n) / BigInt(end.ts - start.ts) };
+}
 
 async function chores(m: Market) {
   const d = (await conn.getAccountInfo(m.key))!.data;
-  const [vB, vR, obs, pB, pR, opool] = await conn.getMultipleAccountsInfo([sideAccounts(m, 0).vault, sideAccounts(m, 1).vault, m.oracleObs, sideAccounts(m, 0).pool, sideAccounts(m, 1).pool, m.oraclePool]);
+  const [vB, vR, obs, pB, pR, opool, psPool] = await conn.getMultipleAccountsInfo([sideAccounts(m, 0).vault, sideAccounts(m, 1).vault, m.oracleObs, sideAccounts(m, 0).pool, sideAccounts(m, 1).pool, m.oraclePool, m.venuePool ?? m.oraclePool]);
   const vaults = [u64(vB!.data, 64), u64(vR!.data, 64)];
   const ckpts = Array.from({ length: 32 }, (_, i) => ({ ts: d.readUInt32LE(496 + i * 16), tc: d.readBigInt64LE(496 + i * 16 + 8) }));
   const nowTs = Math.floor(Date.now() / 1000);
-  const ringTs = obs!.data.readUInt32LE(51 + obs!.data.readUInt16LE(17) * 44);
-  const sampled = ringTs + RING_STALE_SECS < nowTs;
-  const now = twapNow(obs!.data, ckpts, d.readUInt32LE(480), { now: nowTs, tick: opool!.data.readInt32LE(269) });
+  const kind = m.oracleKind ?? 0;
+  // kind 0 reads the CLMM ring (sampling the pool tick itself once the ring is dead); kinds 1-4 always sample the venue's spot
+  const tick = kind ? venueTick(kind, obs!.data, opool!.data, m.venuePool ? psPool!.data : undefined) : opool!.data.readInt32LE(269);
+  const sampled = kind ? true : obs!.data.readUInt32LE(51 + obs!.data.readUInt16LE(17) * 44) + RING_STALE_SECS < nowTs;
+  const now = kind ? sampledTwapNow(ckpts, d.readUInt32LE(480), nowTs, tick) : twapNow(obs!.data, ckpts, d.readUInt32LE(480), { now: nowTs, tick });
   // 0. sampled markets need a heartbeat: every poke is one more point in the window
   if (sampled && nowTs - d.readUInt32LE(484) >= SAMPLE_EVERY_SECS) {
-    await sendV0([cu(60_000), pokeIx(m)], `sample ${m.key.toBase58().slice(0, 6)} tick ${opool!.data.readInt32LE(269)}`);
+    await sendV0([cu(60_000), pokeIx(m)], `sample ${m.key.toBase58().slice(0, 6)} tick ${Math.round(tick)}`);
   }
   // 1. make them pay
   if (now && now.endTs > d.readUInt32LE(484)) {

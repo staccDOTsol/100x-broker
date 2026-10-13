@@ -13,10 +13,10 @@
 //   node x100.mjs unpark <ticker|vault> [pct] unpark (2 txs: in kind, then everything back to SOL)
 //   node x100.mjs finish <ticker|vault>       if an unpark stopped half way: sweep the legs back to SOL
 //   --- list a coin (any Solana token) ---
-//   node x100.mjs pools <mint>                its Raydium CLMM pools, oracle health, existing markets
-//   node x100.mjs create-pool <mint> <sol>    no SOL pool? buy the coin + create one at its price (then seed-pool)
+//   node x100.mjs pools <mint>                its oracle-capable pools on every venue (Raydium CLMM/CPMM, PumpSwap, Meteora DAMM v2/DLMM), depth or ring health, existing markets
+//   node x100.mjs create-pool <mint> <sol>    no pool at all? buy the coin + create a SOL CLMM pool at its price (then seed-pool)
 //   node x100.mjs seed-pool <pool> <sol>      open a wide LP position with the coin you hold, SOL capped at <sol>
-//   node x100.mjs create-market <mint|pool> [window_secs]   curve config, UP curve, DOWN curve, market (4 txs, resumable)
+//   node x100.mjs create-market <mint|pool> [window_secs]   curve config, UP curve, DOWN curve, market (4 txs, resumable); <pool> may be on any venue
 //   node x100.mjs create-vault <market>       a /yield vault for a market whose oracle is a SOL pool
 //   --- keeper (permissionless, any market) ---
 //   node x100.mjs work                        what needs doing: pokes, settles, claims, vaults outside their band
@@ -174,8 +174,13 @@ const cmds = {
   async pools(mint) {
     if (!mint) die("usage: pools <mint>");
     const r = await api(`?pools=${mint}`);
-    console.log(`${r.underlying?.symbol ?? mint}: ${r.pools.length} CLMM pool(s)  → next: ${r.next}`);
-    for (const p of r.pools) console.log(`  ${p.pool}  ${p.quote.padEnd(4)} tvl $${Math.round(p.tvl_usd)}  oracle ${p.oracle_ok ? "ok" : "not yet"} (${p.oracle?.observations ?? 0} obs)  markets: ${p.markets.length ? p.markets.join(" ") : "none"}`);
+    console.log(`${r.underlying?.symbol ?? mint}: ${r.pools.length} pool(s)  → next: ${r.next}`);
+    const usd = (x) => (typeof x === "number" ? `$${Math.round(x)}` : "—");
+    // CLMM oracles are judged by their observation ring; AMM venues (PumpSwap, CPMM, DAMM v2, DLMM) by depth: what it costs to move the price 1%
+    for (const p of r.pools) {
+      const health = p.venue === "clmm" ? `oracle ${p.oracle_ok ? "ok" : "not yet"} (${p.oracle?.observations ?? 0} obs)` : `~${usd(p.depth?.move_1pct_usd)} to move 1%${p.oracle_ok ? "" : " (no reserves)"}`;
+      console.log(`  ${p.pool}  ${(p.venue_label ?? p.venue ?? "").padEnd(15)} ${p.quote.padEnd(4)} tvl ${usd(p.tvl_usd)}  ${health}  markets: ${p.markets.length ? p.markets.join(" ") : "none"}`);
+    }
     console.log(JSON.stringify({ ok: true, ...r }));
   },
   async "create-pool"(mint, sol) {
@@ -195,7 +200,7 @@ const cmds = {
     console.log(`next: ${summary.next}`);
   },
   async "create-market"(q, window) {
-    if (!q) die("usage: create-market <mint|pool> [window_secs]");
+    if (!q) die("usage: create-market <mint|pool> [window_secs]   (pool: Raydium CLMM/CPMM, PumpSwap, Meteora DAMM v2/DLMM — pins the oracle to it)");
     const payer = loadKey().publicKey.toBase58();
     const saved = join(dirname(KEY), `listing-${q}.json`);
     const keys = existsSync(saved) ? JSON.parse(readFileSync(saved, "utf8")) : undefined;
@@ -206,7 +211,7 @@ const cmds = {
       const r = await api("", { kind: "create-market", pool: q, window: window ? Number(window) : undefined, keys: k, payer });
       k = r.keys;
       writeFileSync(saved, JSON.stringify(k), { mode: 0o600 });
-      if (round === 0) console.log(`listing ${r.summary.mint} on oracle ${r.summary.oracle_pool} (${r.summary.quote}) → market ${r.summary.market}`);
+      if (round === 0) console.log(`listing ${r.summary.mint} on ${r.summary.venue_label ?? "Raydium CLMM"} pool ${r.summary.venue_pool ?? r.summary.oracle_pool} (${r.summary.quote}) → market ${r.summary.market}`);
       await runSteps(r.txs, r.steps, r.summary);
       if (!r.more) {
         try { unlinkSync(saved); } catch {}

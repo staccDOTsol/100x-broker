@@ -17,8 +17,11 @@ import {
   getDeltaAmountBaseUnsigned,
 } from "@meteora-ag/dynamic-bonding-curve-sdk";
 import BN from "bn.js";
-import { ALT_AUTHORITY, ALT_FALLBACK, LEVERAGE, PROGRAM_ID, RFSTACC, RPC_URL, WSOL } from "../config.js";
+import { ALT_AUTHORITY, ALT_FALLBACK, LEVERAGE, PROGRAM_ID, RFSTACC, RPC_URL } from "../config.js";
 import { type MarketKeys, cu, settleBeginIx, settleEndIx, settleSwapIx, sideAccounts } from "./hooked.js";
+import { MARKET_ORACLE_KIND, type OracleQuote, type Venue, pumpSwapPoolOf, quoteSymbolOf, slotMints, slotSpotTick, venueOfKind } from "./venues.js";
+
+export { quoteSymbolOf, type OracleQuote };
 
 export const conn = new Connection(RPC_URL, { commitment: "confirmed", disableRetryOnRateLimit: false });
 export const dbc = DynamicBondingCurveClient.create(conn, "confirmed");
@@ -52,6 +55,8 @@ export type MarketAccount = {
   lastObsTs: number;
   underlyingIsToken0: number;
   settling: boolean;
+  /** 0 = Raydium CLMM (every market before venues existed), 1 PumpSwap, 2 Raydium CPMM, 3 Meteora DAMM v2, 4 Meteora DLMM. */
+  oracleKind: number;
   ckpts: Ckpt[];
 };
 
@@ -76,6 +81,7 @@ export function decodeMarket(key: PublicKey, d: Uint8Array): MarketAccount {
     lastObsTs: u32(d, 484),
     underlyingIsToken0: d[489],
     settling: d[490] === 1,
+    oracleKind: d[MARKET_ORACLE_KIND],
     ckpts,
   };
 }
@@ -147,6 +153,27 @@ export function twapNow(obs: Uint8Array, ckpts: Ckpt[], window: number, sample?:
   return { endTs: end.ts, twapQ32: ((end.tc - start.tc) << 32n) / BigInt(end.ts - start.ts) };
 }
 
+/** TWAP for a market that samples the venue itself (kinds 1-4, or a CLMM with a dead ring): the newest checkpoint extended
+ *  with the live tick to `now`, averaged back to the newest checkpoint at or before now - window (else the oldest). Mirrors
+ *  oracle.rs `read_sampled` with no ring. */
+export function ckptTwapNow(ckpts: Ckpt[], window: number, now: number, tick: number) {
+  const valid = ckpts.filter((c) => c.ts > 0);
+  const newest = valid.sort((a, b) => b.ts - a.ts)[0];
+  if (!newest || !Number.isFinite(tick)) return { endTs: now, twapQ32: null as bigint | null };
+  const end: Pt = { ts: now, tc: newest.tc + BigInt(Math.round(tick)) * BigInt(Math.max(0, now - newest.ts)) };
+  const target = Math.max(0, end.ts - window);
+  let best: Pt | undefined;
+  let oldest: Pt = end;
+  for (const p of valid) {
+    if (p.ts > end.ts) continue;
+    if (p.ts <= target && (!best || p.ts > best.ts)) best = p;
+    if (p.ts < oldest.ts) oldest = p;
+  }
+  const start = best ?? oldest;
+  if (start.ts === end.ts) return { endTs: end.ts, twapQ32: null as bigint | null };
+  return { endTs: end.ts, twapQ32: ((end.tc - start.tc) << 32n) / BigInt(end.ts - start.ts) };
+}
+
 /** Tick steps between the market's own checkpoints (what a sampled market records), oldest first. */
 export function ckptSeries(ckpts: Ckpt[]) {
   const sorted = ckpts.filter((c) => c.ts > 0).sort((a, b) => a.ts - b.ts);
@@ -174,13 +201,6 @@ export const keepFactor = (duQ32: bigint) =>
   Math.pow(1.0001, (-LEVERAGE * Number(duQ32 < 0n ? -duQ32 : duQ32)) / 2 ** 32);
 
 // ---------- full market view ----------
-export type OracleQuote = "SOL" | "USDC" | "USDT" | "?";
-export const quoteSymbolOf = (mint: PublicKey): OracleQuote =>
-  mint.equals(WSOL) ? "SOL"
-  : mint.toBase58() === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" ? "USDC"
-  : mint.toBase58() === "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" ? "USDT"
-  : "?";
-
 export type MarketView = {
   acct: MarketAccount;
   keys: MarketKeys;
@@ -194,6 +214,8 @@ export type MarketView = {
     lastTwap: number;
     updatedTs: number;
     quote: OracleQuote;
+    /** Which kind of pool the market reads its price from. */
+    venue: Venue;
   };
   /** Transfer the next poke/transfer would make, from `payer` side. */
   pending: { payer: 0 | 1; amount: bigint; keep: number } | null;
@@ -230,11 +252,36 @@ export async function loadMarketView(key: PublicKey): Promise<MarketView | null>
   const keys: MarketKeys = {
     key, bullMint: a.bullMint, bearMint: a.bearMint, oraclePool: a.oraclePool, oracleObs: a.oracleObs,
     windowSecs: a.windowSecs, underlyingIsToken0: a.underlyingIsToken0, config: pk(pB.data, 72),
+    // kind 0 keys stay exactly what they were (the builders only look at these for kinds >= 1)
+    ...(a.oracleKind ? { oracleKind: a.oracleKind } : {}),
   };
-  const d0 = opool.data[233];
-  const d1 = opool.data[234];
-  const underlyingMint = pk(opool.data, a.underlyingIsToken0 ? 73 : 105).toBase58();
-  const oracleQuote = quoteSymbolOf(pk(opool.data, a.underlyingIsToken0 ? 105 : 73));
+  const venue = venueOfKind(a.oracleKind);
+  const nowTs = Math.floor(Date.now() / 1000);
+  // kind 0: decimals and mints come from the CLMM pool; kinds 1-4: mints from the slot accounts, decimals from the mints
+  let d0: number, d1: number, underlyingMint: string, oracleQuote: OracleQuote;
+  // kind 1: the PumpSwap Pool (virtual_quote_reserves for the price; trailing account for poke/settle/redeem)
+  let venuePoolData: Uint8Array | undefined;
+  if (venue === "clmm") {
+    d0 = opool.data[233];
+    d1 = opool.data[234];
+    underlyingMint = pk(opool.data, a.underlyingIsToken0 ? 73 : 105).toBase58();
+    oracleQuote = quoteSymbolOf(pk(opool.data, a.underlyingIsToken0 ? 105 : 73));
+  } else {
+    const { mint0, mint1 } = slotMints(venue, obs.data, opool.data);
+    const [[m0, m1], psPool] = await Promise.all([
+      conn.getMultipleAccountsInfo([mint0, mint1]),
+      venue === "pumpswap" ? pumpSwapPoolOf(conn, a.bullMint, a.oracleObs, a.oraclePool, obs.data) : null,
+    ]);
+    if (!m0 || !m1) return null;
+    if (psPool) {
+      keys.venuePool = psPool.key;
+      venuePoolData = psPool.data;
+    }
+    d0 = m0.data[44];
+    d1 = m1.data[44];
+    underlyingMint = (a.underlyingIsToken0 ? mint0 : mint1).toBase58();
+    oracleQuote = quoteSymbolOf(a.underlyingIsToken0 ? mint1 : mint0);
+  }
   const tickToPrice = (tick: number) =>
     a.underlyingIsToken0
       ? Math.pow(1.0001, tick) * 10 ** (d0 - d1)
@@ -261,14 +308,22 @@ export async function loadMarketView(key: PublicKey): Promise<MarketView | null>
   };
   const side: [SideView, SideView] = [mk(0, mB, pB, bvB), mk(1, mR, pR, bvR)];
 
-  // a dead ring means the market samples the pool itself: chart its checkpoints + the live tick instead
-  const nowTs = Math.floor(Date.now() / 1000);
-  const poolTick = Buffer.from(opool.data).readInt32LE(269);
-  const { idx: ringIdx, pts: ringPts } = ring(obs.data);
-  const sampled = ringPts[ringIdx].ts + RING_STALE_SECS < nowTs;
-  const rawSeries = sampled ? [...ckptSeries(a.ckpts), { ts: nowTs, tick: poolTick }] : oracleSeries(obs.data);
+  let rawSeries: { ts: number; tick: number }[];
+  let now: { endTs: number; twapQ32: bigint | null };
+  if (venue === "clmm") {
+    // a dead ring means the market samples the pool itself: chart its checkpoints + the live tick instead
+    const poolTick = Buffer.from(opool.data).readInt32LE(269);
+    const { idx: ringIdx, pts: ringPts } = ring(obs.data);
+    const sampled = ringPts[ringIdx].ts + RING_STALE_SECS < nowTs;
+    rawSeries = sampled ? [...ckptSeries(a.ckpts), { ts: nowTs, tick: poolTick }] : oracleSeries(obs.data);
+    now = twapNow(obs.data, a.ckpts, a.windowSecs, { now: Math.floor(Date.now() / 1000), tick: Buffer.from(opool.data).readInt32LE(269) });
+  } else {
+    // AMM venues have no ring: the program samples the pool every settle; its checkpoints + the live spot are the series
+    const spotTick = slotSpotTick(venue, obs.data, opool.data, venuePoolData);
+    rawSeries = [...ckptSeries(a.ckpts), ...(Number.isFinite(spotTick) ? [{ ts: nowTs, tick: spotTick }] : [])];
+    now = ckptTwapNow(a.ckpts, a.windowSecs, nowTs, spotTick);
+  }
   const series = rawSeries.map((p) => ({ ts: p.ts, price: tickToPrice(p.tick) }));
-  const now = twapNow(obs.data, a.ckpts, a.windowSecs, { now: Math.floor(Date.now() / 1000), tick: Buffer.from(opool.data).readInt32LE(269) });
   let pending: MarketView["pending"] = null;
   if (now.twapQ32 !== null && now.endTs > a.lastObsTs) {
     const dTick = now.twapQ32 - a.lastTwapQ32;
@@ -293,6 +348,7 @@ export async function loadMarketView(key: PublicKey): Promise<MarketView | null>
       lastTwap: tickToPrice(Number(a.lastTwapQ32) / 2 ** 32),
       updatedTs: now.endTs,
       quote: oracleQuote,
+      venue,
     },
     pending,
   };
@@ -493,7 +549,8 @@ export function oracleHealth(obs: Uint8Array, nowTs = Math.floor(Date.now() / 10
   return { ...h, ok: h.observations >= 1, sampled: h.lastAgeSecs > RING_STALE_SECS };
 }
 
-/** Markets already listed on a given observation account (any window). */
+/** Markets already listed on a given oracle_obs slot (CLMM observation ring, PumpSwap base ATA, CPMM token-0 vault, Meteora
+ *  pool), any window. */
 export async function marketsForOracle(obs: PublicKey): Promise<PublicKey[]> {
   const res = await conn.getProgramAccounts(PROGRAM_ID, {
     dataSlice: { offset: 0, length: 0 },
