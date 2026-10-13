@@ -2,6 +2,7 @@
 // ~80 RPC calls through the proxy every 6 s; with a few dozen tabs open that is what rate-limited the upstream for everyone.
 import { PublicKey } from "@solana/web3.js";
 import { listMarketKeys, loadMarketView, type MarketView } from "../../src/lib/chain.js";
+import { memo } from "./memo.js";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export async function retry<T>(f: () => Promise<T>, tries = 4): Promise<T> {
@@ -18,24 +19,18 @@ export async function retry<T>(f: () => Promise<T>, tries = 4): Promise<T> {
   throw last;
 }
 
-let cache: { at: number; v: MarketView[] } | null = null;
-let inflight: Promise<MarketView[]> | null = null;
-/** All market views, at most one load per instance per 30 s, concurrent callers share the load. */
-export async function allViews(): Promise<MarketView[]> {
-  if (cache && Date.now() - cache.at < 30_000) return cache.v;
-  if (inflight) return inflight;
-  inflight = (async () => {
+/** All market views: 5 s fresh, served stale up to 30 s more while one background load refreshes them; concurrent callers share
+ *  the load (api/_lib/memo.ts). */
+export const allViews = (): Promise<MarketView[]> =>
+  memo("views:all", 5_000, 30_000, async () => {
     const keys = await retry(listMarketKeys);
     const v: MarketView[] = [];
     for (let i = 0; i < keys.length; i += 3) {
       const batch = await Promise.all(keys.slice(i, i + 3).map((k) => retry(() => loadMarketView(k)).catch(() => null)));
       for (const m of batch) if (m) v.push(m);
     }
-    cache = { at: Date.now(), v };
     return v;
-  })().finally(() => (inflight = null));
-  return inflight;
-}
+  });
 
 /** JSON with bigints and public keys tagged so the browser can revive the exact MarketView shape. */
 export const encode = (x: unknown) =>

@@ -36,8 +36,8 @@ export function useRefWallet() {
 export function marketShare(v: MarketView, ticker: string, wallet: PublicKey | null): ShareTarget {
   const key = v.acct.key.toBase58();
   return {
-    title: `$${ticker} ±100×`,
-    text: `$${ticker} at 100×, up or down. ${lev(v.side[0].leverage)} payout if it pumps, ${lev(v.side[1].leverage)} if it dumps. No liquidations. Somebody's wrong.`,
+    title: `$${ticker} · UP ${lev(v.side[0].leverage)} · DOWN ${lev(v.side[1].leverage)}`,
+    text: `$${ticker}: UP pays ${lev(v.side[0].leverage)}, DOWN pays ${lev(v.side[1].leverage)}. No liquidations. Somebody's wrong.`,
     url: shareUrl(`/m/${key}`, wallet),
     image: `/api/og?m=${key}&${bust()}`,
     filename: `${ticker}-100x.png`,

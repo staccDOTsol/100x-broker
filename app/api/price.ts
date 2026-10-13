@@ -1,5 +1,6 @@
-// SOL/USD for display. Jupiter first, CoinGecko fallback; CDN-cached 30 s.
+// SOL/USD for display. Jupiter first, CoinGecko fallback; 5 s in-process memo (30 s stale), CDN-cached 30 s.
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { memo } from "./_lib/memo.js";
 
 const SOL = "So11111111111111111111111111111111111111112";
 async function jup(): Promise<number> {
@@ -19,7 +20,7 @@ async function gecko(): Promise<number> {
 
 export default async function handler(_req: VercelRequest, res: VercelResponse) {
   try {
-    const solUsd = await jup().catch(gecko);
+    const solUsd = await memo("price:sol", 5_000, 30_000, () => jup().catch(gecko));
     res.setHeader("cache-control", "public, max-age=15, s-maxage=30, stale-while-revalidate=120").json({ solUsd, at: Date.now() });
   } catch (e) {
     res.status(502).json({ error: e instanceof Error ? e.message : "price unavailable" });

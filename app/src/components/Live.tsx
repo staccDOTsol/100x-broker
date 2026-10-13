@@ -1,5 +1,6 @@
 // Live surfaces: the tape (board), the activity feed and the holder/wallet leaderboards.
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Tweet } from "./Share";
 import { Link } from "react-router-dom";
 import { usePoll } from "../hooks";
 import { usePrices } from "../hooks/price";
@@ -9,17 +10,28 @@ import { ago, lev, short, usd } from "../lib/format";
 const SIDE = ["UP", "DOWN"] as const;
 const sideCls = (s: 0 | 1 | undefined) => (s === 0 ? "up" : s === 1 ? "down" : "");
 
-/** One event as a sentence. `withTicker` for cross-market surfaces. */
-function Line({ e, withTicker }: { e: Ev; withTicker: boolean }) {
+/** One event as a sentence. `withTicker` for cross-market surfaces; `plain` when the whole line already sits inside a link. */
+function Line({ e, withTicker, plain = false }: { e: Ev; withTicker: boolean; plain?: boolean }) {
   const px = usePrices();
   const q = e.quote ? px.quoteUsd(BigInt(e.quote)) : null;
   const paidUsd = e.paid ? px.quoteUsd(BigInt(e.paid.amount)) : null;
-  const who = (
+  const who = plain ? (
+    <span className="who num">{short(e.actor)}</span>
+  ) : (
     <Link to={`/p/${e.actor}`} className="who num">
       {short(e.actor)}
     </Link>
   );
-  const tick = withTicker && e.kind !== "burn" ? <Link to={`/m/${e.market}`} className="tick">${e.ticker}</Link> : null;
+  const tick =
+    withTicker && e.kind !== "burn" ? (
+      plain ? (
+        <span className="tick">${e.ticker}</span>
+      ) : (
+        <Link to={`/m/${e.market}`} className="tick">
+          ${e.ticker}
+        </Link>
+      )
+    ) : null;
   const side = <b className={sideCls(e.side)}>{e.side !== undefined ? SIDE[e.side] : ""}</b>;
   const money = q !== null && q > 0 ? <b className="num">{usd(q)}</b> : null;
   const paid =
@@ -70,7 +82,7 @@ function Line({ e, withTicker }: { e: Ev; withTicker: boolean }) {
     case "listed":
       return (
         <>
-          {who} cooked up {tick ?? <b>this market</b>} ±100×
+          {who} cooked up {tick ?? <b>this market</b>}
         </>
       );
     case "burn":
@@ -90,7 +102,7 @@ const weight = (e: Ev, px: ReturnType<typeof usePrices>) => {
 };
 
 export function Feed({ market, limit = 30, actor }: { market?: string; limit?: number; actor?: string }) {
-  const { data, loading, error } = usePoll(() => fetchFeed(market, actor), [market, actor]);
+  const { data, loading, error } = usePoll(() => fetchFeed(market, actor), [market, actor], 6_000);
   const px = usePrices();
   const seen = useRef<Set<string>>(new Set());
   const [fresh, setFresh] = useState<Set<string>>(new Set());
@@ -147,22 +159,22 @@ export function Feed({ market, limit = 30, actor }: { market?: string; limit?: n
 
 /** Horizontal tape of the latest moves across every market. */
 export function Tape() {
-  const { data } = usePoll(() => fetchFeed(), []);
+  const { data } = usePoll(() => fetchFeed(), [], 8_000);
   if (!data?.length) return null;
   const items = data.slice(0, 20);
   const row = (k: string) => (
-    <span className="tape-row" key={k} aria-hidden={k === "b"}>
+    <span className="ticker-row" key={k} aria-hidden={k === "b"}>
       {items.map((e) => (
-        <Link key={k + e.sig} to={e.kind === "burn" ? "/#coin" : `/m/${e.market}${e.side !== undefined ? `?side=${e.side}` : ""}`} className={`tape-item ev-${e.kind}`}>
-          <Line e={e} withTicker />
+        <Link key={k + e.sig} to={e.kind === "burn" ? "/#coin" : `/m/${e.market}${e.side !== undefined ? `?side=${e.side}` : ""}`} className={`ticker-item ev-${e.kind}`}>
+          <Line e={e} withTicker plain />
           <span className="meta"> · {ago(e.ts)}</span>
         </Link>
       ))}
     </span>
   );
   return (
-    <div className="tape" role="marquee" aria-label="Latest activity">
-      <div className="tape-track">
+    <div className="ticker" role="marquee" aria-label="Latest activity">
+      <div className="ticker-track">
         {row("a")}
         {row("b")}
       </div>
@@ -180,10 +192,20 @@ export function Leaders({ market }: { market: string }) {
     return (
       <div className="lb-col" key={side}>
         <div className="meta">
-          <b className={sideCls(side)}>{SIDE[side]}</b> · biggest bags · {lev(data.leverage[side])} payout
+          <b className={sideCls(side)}>{SIDE[side]}</b> · pays {lev(data.leverage[side])}
+          <span className="right">
+            <Tweet
+              text={
+                rows[0]
+                  ? `top ${SIDE[side]} bag on 100x.broker: ${short(rows[0].owner)} · ${usd(rows[0].valueUsd)} · pays ${lev(data.leverage[side])}`
+                  : `${SIDE[side]} is empty · pays ${lev(data.leverage[side])} · nobody's claimed it`
+              }
+              path={`/m/${market}?side=${side}`}
+            />
+          </span>
         </div>
         {rows.length === 0 ? (
-          <p className="note">Nobody's {SIDE[side]} yet. {lev(data.leverage[side])} payout sitting here, unclaimed.</p>
+          <p className="note">Empty side · {lev(data.leverage[side])} unclaimed.</p>
         ) : (
           <ol className="lb">
             {rows.slice(0, 6).map((r, i) => (

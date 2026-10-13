@@ -1,15 +1,14 @@
-// /winners — every realized win, all time: UP/DOWN exits and vault unparks that paid more than they cost. Rank by size, speed, or recency.
-import { useEffect, useMemo, useState } from "react";
+// /winners — the race (net realized SOL, prizes to the top), the period boards, referrers, and every realized win since genesis.
+// Every surface is a card with its own tweet (ref baked in). Labels ≤3 words; the numbers do the talking. All data is the polled feed.
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
+import { useWallet } from "@solana/wallet-adapter-react";
 import { usePoll } from "../hooks";
 import { ago, short } from "../lib/format";
+import { Countdown, Flash, Rolling, Sparkline, useNow } from "../components/Pulse";
+import { CardShare, Tweet } from "../components/Share";
+import { fetchWinners, type RaceLeader as Leader, type RaceRound as Round, type Win } from "../lib/feed";
 
-type Win = {
-  sig: string; ts: number; wallet: string; kind: "exit" | "unpark"; market: string; vault?: string; ticker: string; side?: 0 | 1;
-  cost_sol: number; out_sol: number; gain_sol: number; ret: number; hold_s: number; per_hour_sol: number | null;
-};
-type Leader = { wallet: string; net_sol: number; won_sol: number; lost_sol: number; ref_sol: number; trades: number; best_sol: number; best_sig: string; first: number; last: number };
-type Round = { start: number; end: number; prize_sol: number; prizes_sol: number[]; final: boolean; leaders: Leader[] };
 type Race = { rule: string; live: Round | null; last: Round | null; rolling: Leader[] | null };
 type Period = "24h" | "7d" | "30d" | "all";
 type RefRow = { wallet: string; earned_sol: number; referred_sol: number; deposits: number; referred_wallets: number; last: number };
@@ -20,86 +19,105 @@ type Feed = {
 const PERIODS: Period[] = ["24h", "7d", "30d", "all"];
 const plabel = (p: Period) => (p === "all" ? "all-time" : p);
 type Rank = "gain" | "speed" | "latest" | "ret";
+const MEDAL = ["🥇", "🥈", "🥉", "4th", "5th"];
+const SITE = "100x.broker";
 
-async function load(): Promise<Feed> {
-  const r = await fetch("/api/winners");
-  if (!r.ok) throw new Error(`winners ${r.status}`);
-  return r.json();
-}
+const load = (): Promise<Feed> => fetchWinners();
 const sol = (n: number, d = 3) => `${n < 0 ? "−" : ""}${Math.abs(n).toFixed(d)}`;
+/** A multiplier only means something against a real cost basis; tokens that arrived by transfer have ~0 basis and would print nonsense. */
+const MIN_BASIS_SOL = 0.005;
+const hasBasis = (w: Win) => w.cost_sol >= MIN_BASIS_SOL;
+const mult = (w: Win) => {
+  if (!hasBasis(w)) return "—";
+  const m = w.ret + 1;
+  return `${m >= 10 ? m.toFixed(0) : m.toFixed(1)}×`;
+};
+/** Headline for a win: the multiplier when there's a basis, the SOL gained when there isn't. */
+const headline = (w: Win) => (hasBasis(w) ? mult(w) : `+${sol(w.gain_sol, 2)}`);
+/** Tweet text for a win: `${wallet} just took ${mult} on $TICKER` or `+${gain} SOL` when there's no basis. */
+const winText = (w: Win, verb = "just took") => `${short(w.wallet)} ${verb} ${hasBasis(w) ? mult(w) : `+${sol(w.gain_sol)} SOL`} on $${w.ticker}`;
+const winPath = (w: Win) => `/m/${w.market}`;
 function held(s: number) {
   if (s < 60) return `${Math.max(1, Math.round(s))}s`;
   if (s < 3600) return `${Math.round(s / 60)}m`;
   if (s < 86400) return `${(s / 3600).toFixed(1)}h`;
   return `${(s / 86400).toFixed(1)}d`;
 }
+const hms = (s: number) => {
+  const t = Math.max(0, Math.floor(s));
+  return [Math.floor(t / 3600), Math.floor((t % 3600) / 60), t % 60].map((v) => String(v).padStart(2, "0")).join(":");
+};
 const sorters: Record<Rank, (a: Win, b: Win) => number> = {
   gain: (a, b) => b.gain_sol - a.gain_sol,
   speed: (a, b) => (b.per_hour_sol ?? 0) - (a.per_hour_sol ?? 0),
-  ret: (a, b) => b.ret - a.ret,
+  ret: (a, b) => (hasBasis(b) ? b.ret : -1) - (hasBasis(a) ? a.ret : -1),
   latest: (a, b) => b.ts - a.ts,
 };
-
-function useNow(ms = 1000) {
-  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
-  useEffect(() => {
-    const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), ms);
-    return () => clearInterval(t);
-  }, [ms]);
-  return now;
-}
-function left(s: number) {
-  if (s <= 0) return "0s";
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
-  return `${h}h ${String(m).padStart(2, "0")}m ${String(x).padStart(2, "0")}s`;
-}
 const et = (ts: number) =>
   new Date(ts * 1000).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) + " ET";
 
-function Leaders({ rows, prizes = [] }: { rows: Leader[]; prizes?: number[] }) {
-  if (!rows.length) return <p className="fine">Nobody has closed a trade or earned a referral in this window yet. First one in the green takes the lead.</p>;
+const WhatChip = ({ w }: { w: Win }) =>
+  w.kind === "exit" ? (
+    <Link to={`/m/${w.market}?side=${w.side ?? 0}`} className={`chip ${w.side === 1 ? "down" : "up"}`}>
+      {w.ticker} {w.side === 1 ? "DOWN" : "UP"}
+    </Link>
+  ) : (
+    <Link to={`/yield/${w.vault}`} className="chip">
+      {w.ticker} vault
+    </Link>
+  );
+
+/**
+ * Ranked wallets as rows that physically move when the order changes: each row is absolutely positioned by rank, so a
+ * wallet climbing from 5th to 2nd slides up past the others. Net bar scales to the leader. Every row tweets itself.
+ * `when` is the phrase that lands in the tweet: "this race", "this 24h", "all-time".
+ */
+function RankRows({ rows, prizes = [], me, when }: { rows: Leader[]; prizes?: number[]; me?: string; when: string }) {
+  const ROW = 44;
+  const shown = rows.slice(0, 25);
+  const top = Math.max(1e-9, ...shown.map((r) => Math.abs(r.net_sol)));
+  if (!shown.length) return <p className="fine">Nobody's green yet.</p>;
   return (
-    <table className="arena-table winners-table race-table">
-      <thead>
-        <tr>
-          <th>#</th>
-          <th>who</th>
-          <th className="num">net</th>
-          <th className="num">won</th>
-          <th className="num">lost</th>
-          <th className="num">refs</th>
-          <th className="num">exits</th>
-          <th className="num">prize</th>
-          <th className="num">best</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.slice(0, 25).map((r, i) => (
-          <tr key={r.wallet} className={i < prizes.length ? "race-paid" : undefined}>
-            <td className="rank">{i === 0 && prizes.length ? "👑" : i + 1}</td>
-            <td>
-              <Link to={`/p/${r.wallet}`}>{short(r.wallet)}</Link>
-            </td>
-            <td className={`num net ${r.net_sol >= 0 ? "up" : "down"}`}>{r.net_sol >= 0 ? "+" : ""}{sol(r.net_sol)}</td>
-            <td className="num">{sol(r.won_sol)}</td>
-            <td className="num">{sol(r.lost_sol)}</td>
-            <td className="num">{r.ref_sol ? `+${sol(r.ref_sol, 4)}` : "—"}</td>
-            <td className="num">{r.trades}</td>
-            <td className="num">{i < prizes.length ? `${prizes[i]} SOL` : ""}</td>
-            <td className="num">
-              {r.best_sig ? (
-                <a href={`https://solscan.io/tx/${r.best_sig}`} target="_blank" rel="noreferrer">+{sol(r.best_sol)}</a>
-              ) : "—"}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div className="ranks" style={{ height: shown.length * ROW }}>
+      {shown.map((r, i) => {
+        const paid = i < prizes.length;
+        return (
+          <div
+            key={r.wallet}
+            className={`rank-row ${paid ? "paid" : ""} ${r.wallet === me ? "me" : ""} ${r.net_sol >= 0 ? "up" : "down"}`}
+            style={{ transform: `translateY(${i * ROW}px)` }}
+          >
+            <span className="pos display num">{paid ? MEDAL[i] : i + 1}</span>
+            <Link to={`/p/${r.wallet}`} className="who num">
+              {short(r.wallet)}
+              {r.wallet === me && <span className="chip you">you</span>}
+            </Link>
+            <span className="bar" aria-hidden>
+              <i style={{ width: `${Math.max(2, (Math.abs(r.net_sol) / top) * 100)}%` }} />
+            </span>
+            <Flash watch={r.net_sol} className="net num display">
+              {r.net_sol >= 0 ? "+" : ""}
+              {sol(r.net_sol)}
+            </Flash>
+            <span className="meta num side">
+              {r.trades} exits{r.ref_sol ? ` · refs +${sol(r.ref_sol, 4)}` : ""}
+            </span>
+            <span className="prize num">{paid ? `${prizes[i]} SOL` : ""}</span>
+            <Tweet text={`#${i + 1} ${short(r.wallet)} ${r.net_sol >= 0 ? "+" : ""}${sol(r.net_sol)} SOL ${when} on ${SITE}`} path={`/p/${r.wallet}`} />
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
-function RefLeaders({ rows }: { rows: RefRow[] }) {
-  if (!rows.length) return <p className="fine">No referral payouts in this window yet. Share your link from <Link to="/me">your bag</Link>: every SOL a referred wallet brings in pays you 0.05% of it, on-chain.</p>;
+function RefLeaders({ rows, when }: { rows: RefRow[]; when: string }) {
+  if (!rows.length)
+    return (
+      <p className="fine">
+        No payouts yet. <Link to="/me">Your link →</Link>
+      </p>
+    );
   return (
     <table className="arena-table winners-table race-table">
       <thead>
@@ -107,10 +125,11 @@ function RefLeaders({ rows }: { rows: RefRow[] }) {
           <th>#</th>
           <th>referrer</th>
           <th className="num">earned</th>
-          <th className="num">SOL referred</th>
+          <th className="num">referred</th>
           <th className="num">wallets</th>
           <th className="num">deposits</th>
           <th>last</th>
+          <th aria-label="share" />
         </tr>
       </thead>
       <tbody>
@@ -125,6 +144,9 @@ function RefLeaders({ rows }: { rows: RefRow[] }) {
             <td className="num">{r.referred_wallets}</td>
             <td className="num">{r.deposits}</td>
             <td className="sub">{ago(r.last)}</td>
+            <td className="share-cell">
+              <Tweet text={`#${i + 1} ${short(r.wallet)} earned +${sol(r.earned_sol, 4)} SOL referring ${when} on ${SITE}`} path={`/p/${r.wallet}`} />
+            </td>
           </tr>
         ))}
       </tbody>
@@ -132,17 +154,102 @@ function RefLeaders({ rows }: { rows: RefRow[] }) {
   );
 }
 
-function Leaderboard({ data }: { data: Feed }) {
+/** The race: prize, clock, who's winning, how far you are from money. One tweet for the whole card. */
+function RaceHead({ race, me }: { race: Race; me?: string }) {
+  const now = useNow();
+  const r = race.live;
+  if (!r) {
+    const last = race.last;
+    const paid = last ? last.prizes_sol.reduce((a, b) => a + b, 0) : 0;
+    return (
+      <section className="race-head">
+        <div className="race-pitch">
+          <h1 className="display">Next race soon.</h1>
+          {last && (
+            <div className="win-tags">
+              <span className="chip">
+                <b className="num">{paid} SOL</b> paid
+              </span>
+              <span className="chip num">{et(last.end)}</span>
+              {!last.final && <span className="chip">final scan pending</span>}
+              <CardShare text={`${paid} SOL paid out in the last race on ${SITE}`} path="/winners" />
+            </div>
+          )}
+        </div>
+      </section>
+    );
+  }
+  const left = r.end - now;
+  const prize = r.prizes_sol.reduce((a, b) => a + b, 0);
+  const myIdx = me ? r.leaders.findIndex((l) => l.wallet === me) : -1;
+  const lastPaid = r.leaders[r.prizes_sol.length - 1];
+  const onPodium = myIdx >= 0 && myIdx < r.prizes_sol.length;
+  const gap = lastPaid ? (onPodium ? 0 : lastPaid.net_sol - (myIdx >= 0 ? r.leaders[myIdx].net_sol : 0)) : 0;
+  return (
+    <section className={`race-head ${left < 3600 ? "hot" : ""}`}>
+      <div className="race-pitch">
+        <div className="meta kicker">
+          <span className="live-dot" aria-hidden /> live race
+          <CardShare text={`${prize} SOL race on ${SITE} · ${hms(left)} left`} path="/winners" />
+        </div>
+        <h1 className="display">
+          <Rolling value={prize} format={(n) => n.toFixed(0)} /> SOL
+          <br />
+          on the line.
+        </h1>
+        <div className="podium">
+          {r.prizes_sol.map((p, i) => (
+            <span key={i} className={`chip podium-chip p${i}`}>
+              {MEDAL[i]} {p} SOL
+            </span>
+          ))}
+        </div>
+        <div className="win-tags">
+          <span className="chip">net realized</span>
+          <span className="chip">any wallet</span>
+          <span className="chip">close to score</span>
+        </div>
+      </div>
+      <div className="clock-card panel">
+        <Countdown to={r.end} label={left > 0 ? "next payout" : "scoring"} />
+        <Link to="/" className="btn signal big display">
+          Enter race →
+        </Link>
+        <p className="meta num gap-line">
+          {onPodium ? (
+            <>
+              you're {MEDAL[myIdx]} · <b>hold it</b>
+            </>
+          ) : lastPaid ? (
+            <>
+              <b className="up">{gap > 0 ? `+${sol(gap)} SOL` : "one green exit"}</b> to {MEDAL[r.prizes_sol.length - 1]} {short(lastPaid.wallet)}
+            </>
+          ) : (
+            "podium open"
+          )}
+        </p>
+      </div>
+    </section>
+  );
+}
+
+function Leaderboard({ data, me }: { data: Feed; me?: string }) {
   const [kind, setKind] = useState<"pnl" | "refs">("pnl");
   const [period, setPeriod] = useState<Period>("24h");
   const race = data.race;
   const raceTab = kind === "pnl" && period === "24h" && race;
+  const live = race?.live;
+  const when = period === "all" ? "all-time" : `this ${period}`;
   return (
     <section className="arena race" aria-label="Leaderboard">
       <div className="winners-bar">
         <div className="seg" role="tablist" aria-label="board">
-          <button className="chip" aria-pressed={kind === "pnl"} onClick={() => setKind("pnl")}>top P&amp;L</button>
-          <button className="chip" aria-pressed={kind === "refs"} onClick={() => setKind("refs")}>top referrers</button>
+          <button className="chip" aria-pressed={kind === "pnl"} onClick={() => setKind("pnl")}>
+            P&amp;L
+          </button>
+          <button className="chip" aria-pressed={kind === "refs"} onClick={() => setKind("refs")}>
+            referrers
+          </button>
         </div>
         <div className="seg" role="tablist" aria-label="window">
           {PERIODS.map((p) => (
@@ -153,94 +260,194 @@ function Leaderboard({ data }: { data: Feed }) {
         </div>
       </div>
       {raceTab ? (
-        <RaceBoard race={race} />
+        live ? (
+          <RankRows rows={live.leaders} prizes={live.prizes_sol} me={me} when="this race" />
+        ) : (
+          <>
+            {race.last && <RankRows rows={race.last.leaders} prizes={race.last.prizes_sol} me={me} when="last race" />}
+            <p className="meta">rolling 24h</p>
+            <RankRows rows={race.rolling ?? []} me={me} when="this 24h" />
+          </>
+        )
       ) : kind === "pnl" ? (
-        <>
-          <p className="lede">Net realized P&amp;L per wallet, {period === "all" ? "all time" : `last ${period}`}: every exit and unpark, winners minus losers, plus referral fees earned.</p>
-          <Leaders rows={data.boards?.[period] ?? []} />
-        </>
+        <RankRows rows={data.boards?.[period] ?? []} me={me} when={when} />
       ) : (
-        <>
-          <p className="lede">Referral fees earned, {period === "all" ? "all time" : `last ${period}`}: 0.05% of every SOL your referred wallets bring in, paid on-chain by the stake pool to your r-fstacc.</p>
-          <RefLeaders rows={data.refs?.[period] ?? []} />
-        </>
+        <RefLeaders rows={data.refs?.[period] ?? []} when={when} />
       )}
+      <details className="fine">
+        <summary>how it's scored</summary>
+        <ul className="rule-bits">
+          <li>net realized SOL</li>
+          <li>exits · unparks · refs</li>
+          <li>
+            raw: <a href="/api/winners">/api/winners</a>
+          </li>
+        </ul>
+      </details>
     </section>
   );
 }
 
-function RaceBoard({ race }: { race: Race }) {
-  const now = useNow();
-  const r = race.live;
+/** Wins as they land. New rows slide in; multiplier (or SOL gained when there's no basis) is the headline. Each row tweets itself. */
+function Landing({ wins }: { wins: Win[] }) {
+  const seen = useRef<Set<string> | null>(null);
+  const [fresh, setFresh] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    if (!seen.current) {
+      seen.current = new Set(wins.map((w) => w.sig));
+      return;
+    }
+    const now = new Set<string>();
+    for (const w of wins) if (!seen.current.has(w.sig)) (seen.current.add(w.sig), now.add(w.sig));
+    if (now.size) {
+      setFresh(now);
+      const t = setTimeout(() => setFresh(new Set()), 5000);
+      return () => clearTimeout(t);
+    }
+  }, [wins]);
+  const rows = [...wins].sort(sorters.latest).slice(0, 8);
+  if (!rows.length) return null;
   return (
-    <div className="race-round">
-      {r ? (
-        <>
-          <h2 className="display race-prizes">{r.prizes_sol.map((p, i) => `${["🥇", "🥈", "🥉", "4th", "5th"][i]} ${p} SOL`).join("   ")}</h2>
-          <p className="lede">
-            Biggest <b>net</b> realized P&amp;L in SOL between {et(r.start)} and <b>{et(r.end)}</b>: {r.prizes_sol.map((p, i) => `${["1st", "2nd", "3rd", "4th", "5th"][i]} ${p} SOL`).join(" · ")}. Humans and agents alike: any wallet, any bot, any on-chain actor.
-          </p>
-          <p className="race-clock">
-            ends in <b>{left(r.end - now)}</b>
-          </p>
-          <Leaders rows={r.leaders} prizes={r.prizes_sol} />
-        </>
-      ) : (
-        <>
-          <h2 className="display">Last round</h2>
-          {race.last && (
-            <>
-              <p className="lede">
-                Round ended {et(race.last.end)} · {race.last.prizes_sol.join(" / ")} SOL to the top {race.last.prizes_sol.length}{race.last.final ? "" : " · final scan pending"}.
-              </p>
-              <Leaders rows={race.last.leaders} prizes={race.last.prizes_sol} />
-            </>
-          )}
-          <p className="lede">Next prize to be announced. The rolling last 24h, meanwhile:</p>
-          <Leaders rows={race.rolling ?? []} />
-        </>
-      )}
-      <p className="fine">
-        Scored as net realized SOL per wallet: every UP/DOWN exit (sell or cash-out) and vault unpark that lands in the window counts, winners minus losers, at average cost basis, plus the referral fees your link earned in the window (r-fstacc at today's rate). Self-referrals don't count. Unrealized bags don't count; close it to score it. The house keeper and the vaults' own accounts are excluded. Ties go to whoever got there first. Agents: every board is JSON at <a href="/api/winners">/api/winners</a> → <code>race</code>, <code>boards</code>, <code>refs</code>.
-      </p>
-    </div>
+    <ol className="landing" aria-live="polite">
+      {rows.map((w) => (
+        <li key={w.sig} className={`land ${fresh.has(w.sig) ? "fresh" : ""} ${hasBasis(w) && w.ret >= 1 ? "loud" : ""}`}>
+          <span className={`mult display num ${w.side === 1 ? "down" : "up"}`}>{headline(w)}</span>
+          <span className="what">
+            <Link to={`/p/${w.wallet}`} className="num">
+              {short(w.wallet)}
+            </Link>{" "}
+            <WhatChip w={w} />
+          </span>
+          <span className="won num up">{hasBasis(w) ? `+${sol(w.gain_sol)} SOL` : "SOL won"}</span>
+          <span className="meta num">
+            {held(w.hold_s)} ·{" "}
+            <a href={`https://solscan.io/tx/${w.sig}`} target="_blank" rel="noreferrer">
+              {ago(w.ts)}
+            </a>
+          </span>
+          <CardShare text={winText(w)} path={winPath(w)} />
+        </li>
+      ))}
+    </ol>
   );
 }
 
 export default function WinnersPage() {
-  const { data, error, loading } = usePoll(load, [], 30_000);
+  const { data, error, loading } = usePoll(load, [], 15_000);
+  const { publicKey } = useWallet();
+  const me = publicKey?.toBase58();
   const [rank, setRank] = useState<Rank>("gain");
   const [only, setOnly] = useState<"all" | "exit" | "unpark">("all");
   const rows = useMemo(() => {
     const w = (data?.wins ?? []).filter((x) => only === "all" || x.kind === only);
     return [...w].sort(sorters[rank]).slice(0, 300);
   }, [data, rank, only]);
+  const best = useMemo(() => {
+    const w = (data?.wins ?? []).filter(hasBasis);
+    return w.length ? w.reduce((a, b) => (b.ret > a.ret ? b : a)) : null;
+  }, [data]);
+  const fastest = useMemo(
+    () => (data?.wins.length ? data.wins.reduce((a, b) => ((b.per_hour_sol ?? 0) > (a.per_hour_sol ?? 0) ? b : a)) : null),
+    [data],
+  );
+  /** Cumulative SOL won over the last 200 realized wins, oldest → newest. Real wins only; this is what the "won all-time" card draws. */
+  const curve = useMemo(() => {
+    const w = [...(data?.wins ?? [])].sort((a, b) => a.ts - b.ts).slice(-200);
+    let acc = 0;
+    return w.map((x) => ({ ts: x.ts, price: (acc += x.gain_sol) }));
+  }, [data]);
+  if (!data)
+    return (
+      <div className="race-head">
+        <div className="race-pitch">
+          <div className="skeleton" style={{ height: 96, width: "60%" }} />
+          <div className="skeleton" style={{ height: 20, width: "40%", marginTop: 12 }} />
+        </div>
+        <div className="skeleton" style={{ height: 180 }} />
+        {error && !loading && <p className="err">Leaderboard unavailable: {error}</p>}
+      </div>
+    );
   return (
     <>
-      <header className="spicy-head">
-        <div className="meta">
-          <Link to="/">Board</Link> / winners
-        </div>
-        <h1 className="display">Leaderboard</h1>
-      </header>
-      {data ? <Leaderboard data={data} /> : <p className="fine">{loading ? "Loading the leaderboard…" : "Leaderboard unavailable."}</p>}
-      <header className="spicy-head alltime-head">
-        <h2 className="display">All-time winner feed</h2>
-        <p className="lede">
-          Every realized win since genesis. An <b className="up">UP</b>/<b className="down">DOWN</b> exit that paid more than its tokens cost, or a <Link to="/yield">/yield</Link> unpark that handed back more SOL than the receipts cost. Ranked all time.
-        </p>
-        {data && (
-          <p className="fine">
-            {data.count} wins · {data.wallets} wallets · {sol(data.total_sol, 2)} SOL won · {data.exits} exits, {data.unparks} unparks · scanned {ago(data.at)}
-          </p>
-        )}
-      </header>
-      <section className="arena winners" aria-label="All-time winner feed">
+      {data.race ? (
+        <RaceHead race={data.race} me={me} />
+      ) : (
+        <header className="spicy-head">
+          <h1 className="display">Leaderboard</h1>
+        </header>
+      )}
+      <div className="win-grid">
+        <Leaderboard data={data} me={me} />
+        <aside className="win-aside">
+          {best && (
+            <div className="panel best">
+              <span className="meta stat-head">
+                best return
+                <CardShare text={`${winText(best, "took")} on ${SITE}`} path={winPath(best)} />
+              </span>
+              <Link
+                to={best.kind === "exit" ? `/m/${best.market}?side=${best.side ?? 0}` : `/yield/${best.vault}`}
+                className={`display huge num ${best.side === 1 ? "down" : "up"}`}
+              >
+                {mult(best)}
+              </Link>
+              <span className="win-tags">
+                <Link to={`/p/${best.wallet}`} className="chip num">
+                  {short(best.wallet)}
+                </Link>
+                <WhatChip w={best} />
+                <span className="chip num">
+                  {sol(best.cost_sol)} → {sol(best.out_sol)}
+                </span>
+                <span className="chip num">{held(best.hold_s)}</span>
+              </span>
+            </div>
+          )}
+          {fastest && fastest.per_hour_sol && (
+            <div className="panel stat-card">
+              <span className="meta stat-head">
+                fastest SOL/hr
+                <CardShare text={`${short(fastest.wallet)} +${sol(fastest.per_hour_sol, 2)} SOL/hr on $${fastest.ticker} on ${SITE}`} path={winPath(fastest)} />
+              </span>
+              <span className="display num up">+{sol(fastest.per_hour_sol, 2)}</span>
+              <span className="win-tags">
+                <Link to={`/p/${fastest.wallet}`} className="chip num">
+                  {short(fastest.wallet)}
+                </Link>
+                <WhatChip w={fastest} />
+                <span className="chip num">{held(fastest.hold_s)}</span>
+              </span>
+            </div>
+          )}
+          <div className="panel stat-card">
+            <span className="meta stat-head">
+              won all-time
+              <CardShare text={`+${sol(data.total_sol, 2)} SOL won on ${SITE} · ${data.count} wins · ${data.wallets} wallets`} path="/winners" />
+            </span>
+            <span className="display num up">
+              +<Rolling value={data.total_sol} format={(n) => n.toFixed(2)} /> SOL
+            </span>
+            {curve.length >= 2 && <Sparkline series={curve} w={240} h={40} className="won-curve" label={`SOL won, last ${curve.length} wins`} />}
+            <span className="win-tags">
+              <span className="chip num">{data.count} wins</span>
+              <span className="chip num">{data.wallets} wallets</span>
+              <span className="chip num">{ago(data.at)}</span>
+            </span>
+          </div>
+          <h2 className="display h-small">
+            <span className="live-dot" aria-hidden /> Landing now
+          </h2>
+          <Landing wins={data.wins} />
+        </aside>
+      </div>
+
+      <section className="arena winners" aria-label="All-time wins">
         <div className="winners-bar">
+          <h2 className="display h-small">Every win. Ever.</h2>
           <div className="seg" role="tablist" aria-label="rank by">
-            {(["gain", "speed", "ret", "latest"] as Rank[]).map((r) => (
+            {(["gain", "ret", "speed", "latest"] as Rank[]).map((r) => (
               <button key={r} className="chip" aria-pressed={rank === r} onClick={() => setRank(r)}>
-                {r === "gain" ? "biggest" : r === "speed" ? "fastest (SOL/hr)" : r === "ret" ? "best %" : "latest"}
+                {r === "gain" ? "biggest" : r === "speed" ? "SOL/hr" : r === "ret" ? "best ×" : "latest"}
               </button>
             ))}
           </div>
@@ -259,37 +466,30 @@ export default function WinnersPage() {
                 <th>#</th>
                 <th>who</th>
                 <th>what</th>
+                <th className="num">×</th>
                 <th className="num">in</th>
                 <th className="num">out</th>
                 <th className="num">won</th>
                 <th className="num">held</th>
                 <th className="num">SOL/hr</th>
                 <th>when</th>
+                <th aria-label="share" />
               </tr>
             </thead>
             <tbody>
               {rows.map((w, i) => (
-                <tr key={w.sig}>
+                <tr key={w.sig} className={w.wallet === me ? "me" : undefined}>
                   <td className="rank">{i + 1}</td>
                   <td>
                     <Link to={`/p/${w.wallet}`}>{short(w.wallet)}</Link>
                   </td>
                   <td>
-                    {w.kind === "exit" ? (
-                      <Link to={`/m/${w.market}?side=${w.side ?? 0}`} className={`chip ${w.side === 1 ? "down" : "up"}`}>
-                        {w.ticker} {w.side === 1 ? "DOWN" : "UP"}
-                      </Link>
-                    ) : (
-                      <Link to={`/yield/${w.vault}`} className="chip">
-                        {w.ticker} vault
-                      </Link>
-                    )}
+                    <WhatChip w={w} />
                   </td>
+                  <td className={`num mult-cell ${hasBasis(w) && w.ret >= 1 ? "up" : ""}`}>{mult(w)}</td>
                   <td className="num">{sol(w.cost_sol)}</td>
                   <td className="num">{sol(w.out_sol)}</td>
-                  <td className="num net up">
-                    +{sol(w.gain_sol)} <small>({(w.ret * 100).toFixed(0)}%)</small>
-                  </td>
+                  <td className="num net up">+{sol(w.gain_sol)}</td>
                   <td className="num">{held(w.hold_s)}</td>
                   <td className="num">{w.per_hour_sol === null ? "—" : sol(w.per_hour_sol, 4)}</td>
                   <td className="sub">
@@ -297,20 +497,27 @@ export default function WinnersPage() {
                       {ago(w.ts)}
                     </a>
                   </td>
+                  <td className="share-cell">
+                    <Tweet text={`${winText(w, "took")} on ${SITE}`} path={winPath(w)} />
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         ) : (
           <div className="empty arena-empty">
-            <div className="display">{loading && !data ? "Counting the wins…" : "No wins yet."}</div>
-            {!loading && data && <p>Nobody has exited green yet. The empty side pays best; go be it.</p>}
+            <div className="display">No wins yet.</div>
+            <p>Empty side pays.</p>
           </div>
         )}
-        {error && !data && <p className="err">Couldn't load the winner feed: {error}</p>}
-        <p className="fine">
-          In/out in SOL (r-fstacc at today's rate for exits). Cost is average basis of the tokens or receipts that moved. Held is since the first buy or park. Vault wins count the SOL that came back to the wallet; the 0/20 slice committed to the raise still counts as won.
-        </p>
+        <details className="fine">
+          <summary>what counts</summary>
+          <ul className="rule-bits">
+            <li>in/out in SOL</li>
+            <li>average cost basis</li>
+            <li>held since buy</li>
+          </ul>
+        </details>
       </section>
     </>
   );

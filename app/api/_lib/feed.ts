@@ -3,6 +3,13 @@ import { Connection, PublicKey, type ParsedInstruction, type ParsedTransactionWi
 import bs58 from "bs58";
 import { getAsset } from "./das.js";
 import { readMarketCard } from "./og.js";
+import { memo, peek } from "./memo.js";
+import { parsedTxs, recentSigs } from "./txcache.js";
+
+// memo windows (ms): fresh / stale. Account lists and views refresh often; parsed history is incremental so it refreshes cheaply.
+const LIST_TTL = 5_000, LIST_STALE = 30_000;
+const FEED_TTL = 5_000, FEED_STALE = 60_000;
+const BOARD_TTL = 15_000, BOARD_STALE = 120_000;
 
 const PROGRAM_ID = new PublicKey(process.env.VITE_PROGRAM_ID ?? "T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb");
 const DBC = "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN";
@@ -28,29 +35,27 @@ export type Ctx = {
   quoteVaults: [string, string];
   escrows: [string, string];
 };
-const ctxCache = new Map<string, { at: number; v: Ctx }>();
-export async function marketCtx(key: PublicKey): Promise<Ctx> {
-  const hit = ctxCache.get(key.toBase58());
-  if (hit && Date.now() - hit.at < 300_000) return hit.v;
-  const c = conn();
-  const d = (await c.getAccountInfo(key))!.data;
-  if (d.length !== MARKET_LEN) throw new Error("not a market");
-  const [pB, pR, mB, mR, opool] = await c.getMultipleAccountsInfo([new PublicKey(pk(d, 232)), new PublicKey(pk(d, 264)), new PublicKey(pk(d, 8)), new PublicKey(pk(d, 40)), new PublicKey(pk(d, 104))]);
-  const underlying = pk(opool!.data, d[489] ? 73 : 105);
-  const asset = await getAsset(underlying).catch(() => null);
-  const v: Ctx = {
-    key: key.toBase58(),
-    ticker: asset?.symbol ?? underlying.slice(0, 4),
-    mints: [pk(d, 8), pk(d, 40)],
-    decimals: [mB!.data[44], mR!.data[44]],
-    vaults: [pk(d, 168), pk(d, 200)],
-    baseVaults: [pk(d, 296), pk(d, 328)],
-    quoteVaults: [pk(pB!.data, 200), pk(pR!.data, 200)],
-    escrows: [pk(d, 360), pk(d, 392)],
-  };
-  ctxCache.set(key.toBase58(), { at: Date.now(), v });
-  return v;
-}
+/** A market's fixed addresses (mints, vaults, curves) plus its ticker: 5 min fresh, a day stale — none of it moves. */
+export const marketCtx = (key: PublicKey): Promise<Ctx> =>
+  memo(`feed:ctx:${key.toBase58()}`, 300_000, 86_400_000, async () => {
+    const c = conn();
+    const d = (await c.getAccountInfo(key))!.data;
+    if (d.length !== MARKET_LEN) throw new Error("not a market");
+    const [pB, pR, mB, mR, opool] = await c.getMultipleAccountsInfo([new PublicKey(pk(d, 232)), new PublicKey(pk(d, 264)), new PublicKey(pk(d, 8)), new PublicKey(pk(d, 40)), new PublicKey(pk(d, 104))]);
+    const underlying = pk(opool!.data, d[489] ? 73 : 105);
+    const asset = await getAsset(underlying).catch(() => null);
+    const v: Ctx = {
+      key: key.toBase58(),
+      ticker: asset?.symbol ?? underlying.slice(0, 4),
+      mints: [pk(d, 8), pk(d, 40)],
+      decimals: [mB!.data[44], mR!.data[44]],
+      vaults: [pk(d, 168), pk(d, 200)],
+      baseVaults: [pk(d, 296), pk(d, 328)],
+      quoteVaults: [pk(pB!.data, 200), pk(pR!.data, 200)],
+      escrows: [pk(d, 360), pk(d, 392)],
+    };
+    return v;
+  });
 
 export type Ev = {
   sig: string;
@@ -149,41 +154,40 @@ export function classify(tx: ParsedTransactionWithMeta, ctx: Ctx): Ev | null {
   return null;
 }
 
-export async function marketFeed(key: PublicKey, limit = 40): Promise<Ev[]> {
-  const c = conn();
-  const [ctx, sigs] = await Promise.all([marketCtx(key), c.getSignaturesForAddress(key, { limit })]);
-  const ok = sigs.filter((s) => !s.err).map((s) => s.signature);
-  const txs = await c.getParsedTransactions(ok, { maxSupportedTransactionVersion: 0 });
-  return txs.map((t) => (t ? classify(t, ctx) : null)).filter((e): e is Ev => !!e);
-}
+/** The latest `limit` signatures of one market, classified. Incremental: only signatures newer than the last refresh are fetched
+ *  and only transactions not parsed before go upstream (api/_lib/txcache.ts). */
+export const marketFeed = (key: PublicKey, limit = 40): Promise<Ev[]> =>
+  memo(`feed:market:${key.toBase58()}:${limit}`, FEED_TTL, FEED_STALE, async () => {
+    const c = conn();
+    const [ctx, sigs] = await Promise.all([marketCtx(key), recentSigs(c, key, limit)]);
+    const ok = sigs.filter((s) => !s.err).map((s) => s.signature);
+    const txs = await parsedTxs(c, ok);
+    return txs.map((t) => (t ? classify(t, ctx) : null)).filter((e): e is Ev => !!e);
+  });
 
-export async function allMarkets(): Promise<PublicKey[]> {
-  const res = await conn().getProgramAccounts(PROGRAM_ID, { dataSlice: { offset: 0, length: 0 }, filters: [{ dataSize: MARKET_LEN }] });
-  return res.map((r) => r.pubkey);
-}
+export const allMarkets = (): Promise<PublicKey[]> =>
+  memo("feed:markets", LIST_TTL, LIST_STALE, async () => {
+    const res = await conn().getProgramAccounts(PROGRAM_ID, { dataSlice: { offset: 0, length: 0 }, filters: [{ dataSize: MARKET_LEN }] });
+    return res.map((r) => r.pubkey);
+  });
 
 // ---------- plumbing, not people ----------
 const DN_PROGRAM = new PublicKey("2ZbjE44nSh3AmpREg4sdNMViBLAzAEtFKYDn1XdqMzEj");
 /** Signs every vault rebalance, so it would top any activity list on its own. */
 const KEEPER = process.env.DN_KEEPER ?? "EGa3ng1xcuB5X9tkK7czYczhD4PpAYAJF52Vo9F2Cn7";
-let botCache: { at: number; v: Set<string> } | null = null;
-/** The keeper plus every dnvault PDA and its SOL sub-account: they hold DOWN and trade it, but they are not wallets. 5 min cache. */
-export async function botAddresses(): Promise<Set<string>> {
-  if (botCache && Date.now() - botCache.at < 300_000) return botCache.v;
-  const v = new Set([KEEPER]);
-  try {
+/** The keeper plus every dnvault PDA and its SOL sub-account: they hold DOWN and trade it, but they are not wallets. 5 min fresh,
+ *  an hour stale; a flaky RPC keeps the last good set rather than letting the vaults back onto the board. */
+export const botAddresses = (): Promise<Set<string>> =>
+  memo<Set<string>>("feed:bots", 300_000, 3_600_000, async () => {
+    const v = new Set([KEEPER]);
     // "dnvault1" in base58, the same filter the client's listVaults uses
     const res = await conn().getProgramAccounts(DN_PROGRAM, { filters: [{ memcmp: { offset: 0, bytes: "HoK4CZtz9b6" } }] });
     for (const a of res) {
       v.add(a.pubkey.toBase58());
       v.add(pk(a.account.data, 392)); // solPda
     }
-    botCache = { at: Date.now(), v };
     return v;
-  } catch {
-    return botCache?.v ?? v; // a flaky RPC should not let the vaults back onto the board
-  }
-}
+  }).catch(() => peek<Set<string>>("feed:bots") ?? new Set([KEEPER]));
 
 const MEME = process.env.VITE_MEME_MINT ?? "Fr28jEWz2msSCKLaHzus2nCKrwqbpTx2EyDYtsVVpump";
 const BURN_STATE = PublicKey.findProgramAddressSync([Buffer.from("burn-state")], PROGRAM_ID)[0];
@@ -198,19 +202,21 @@ function burnEv(tx: ParsedTransactionWithMeta): Ev | null {
   return { sig: tx.transaction.signatures[0], ts: tx.blockTime ?? 0, kind: "burn", market: BURN_STATE.toBase58(), ticker: "100XBRO", actor: tx.transaction.message.accountKeys[0].pubkey.toBase58(), tokens: Number(b.amount) / 1e6, quote: paid.toString() };
 }
 
-/** $100X burns: every one touches the burn-state PDA. */
-export async function burnFeed(limit = 20): Promise<Ev[]> {
-  const c = conn();
-  const sigs = await c.getSignaturesForAddress(BURN_STATE, { limit });
-  const txs = await c.getParsedTransactions(sigs.filter((s) => !s.err).map((s) => s.signature), { maxSupportedTransactionVersion: 0 });
-  return txs.map((t) => (t ? burnEv(t) : null)).filter((e): e is Ev => !!e);
-}
+/** $100X burns: every one touches the burn-state PDA. Incremental like marketFeed. */
+export const burnFeed = (limit = 20): Promise<Ev[]> =>
+  memo(`feed:burn:${limit}`, FEED_TTL, FEED_STALE, async () => {
+    const c = conn();
+    const sigs = await recentSigs(c, BURN_STATE, limit);
+    const txs = await parsedTxs(c, sigs.filter((s) => !s.err).map((s) => s.signature));
+    return txs.map((t) => (t ? burnEv(t) : null)).filter((e): e is Ev => !!e);
+  });
 
-export async function globalFeed(perMarket = 15): Promise<Ev[]> {
-  const markets = await allMarkets();
-  const feeds = await Promise.all([...markets.map((m) => marketFeed(m, perMarket).catch(() => [] as Ev[])), burnFeed(20).catch(() => [] as Ev[])]);
-  return feeds.flat().sort((a, b) => b.ts - a.ts).slice(0, 60);
-}
+export const globalFeed = (perMarket = 15): Promise<Ev[]> =>
+  memo(`feed:global:${perMarket}`, FEED_TTL, FEED_STALE, async () => {
+    const markets = await allMarkets();
+    const feeds = await Promise.all([...markets.map((m) => marketFeed(m, perMarket).catch(() => [] as Ev[])), burnFeed(20).catch(() => [] as Ev[])]);
+    return feeds.flat().sort((a, b) => b.ts - a.ts).slice(0, 60);
+  });
 
 const T22 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 const TOK = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -219,33 +225,35 @@ const ataOf = (mint: PublicKey, owner: PublicKey, program = T22) =>
   PublicKey.findProgramAddressSync([owner.toBuffer(), program.toBuffer(), mint.toBuffer()], ATA_PROG)[0];
 
 /** One wallet's moves. Its UP/DOWN token accounts are the index (every buy/sell/redeem touches one), its $100X account for burns. */
-export async function walletFeed(owner: PublicKey, perAccount = 40): Promise<Ev[]> {
-  const c = conn();
-  const ctxs = await Promise.all((await allMarkets()).map((m) => marketCtx(m).catch(() => null)));
-  const jobs: { ata: PublicKey; ctx: Ctx | null }[] = [{ ata: ataOf(new PublicKey(MEME), owner, TOK), ctx: null }];
-  for (const ctx of ctxs) if (ctx) for (const m of ctx.mints) jobs.push({ ata: ataOf(new PublicKey(m), owner), ctx });
-  const lists = await Promise.all(jobs.map((j) => c.getSignaturesForAddress(j.ata, { limit: perAccount }).catch(() => [])));
-  const ctxOf = new Map<string, Ctx | null>();
-  lists.forEach((l, i) => l.forEach((s) => !s.err && !ctxOf.has(s.signature) && ctxOf.set(s.signature, jobs[i].ctx)));
-  const sigs = [...ctxOf.keys()];
-  const txs: (ParsedTransactionWithMeta | null)[] = [];
-  for (let i = 0; i < sigs.length; i += 100) txs.push(...(await c.getParsedTransactions(sigs.slice(i, i + 100), { maxSupportedTransactionVersion: 0 })));
-  const me = owner.toBase58();
-  const out: Ev[] = [];
-  txs.forEach((tx, i) => {
-    if (!tx) return;
-    const ctx = ctxOf.get(sigs[i]);
-    const ev = ctx ? classify(tx, ctx) : burnEv(tx);
-    if (ev && ev.actor === me) out.push(ev);
+export const walletFeed = (owner: PublicKey, perAccount = 40): Promise<Ev[]> =>
+  memo(`feed:wallet:${owner.toBase58()}:${perAccount}`, FEED_TTL, FEED_STALE, async () => {
+    const c = conn();
+    const ctxs = await Promise.all((await allMarkets()).map((m) => marketCtx(m).catch(() => null)));
+    const jobs: { ata: PublicKey; ctx: Ctx | null }[] = [{ ata: ataOf(new PublicKey(MEME), owner, TOK), ctx: null }];
+    for (const ctx of ctxs) if (ctx) for (const m of ctx.mints) jobs.push({ ata: ataOf(new PublicKey(m), owner), ctx });
+    // one `until` call per token account: an account with nothing new answers with an empty page
+    const lists = await Promise.all(jobs.map((j) => recentSigs(c, j.ata, perAccount).catch(() => [])));
+    const ctxOf = new Map<string, Ctx | null>();
+    lists.forEach((l, i) => l.forEach((s) => !s.err && !ctxOf.has(s.signature) && ctxOf.set(s.signature, jobs[i].ctx)));
+    const sigs = [...ctxOf.keys()];
+    const txs = await parsedTxs(c, sigs);
+    const me = owner.toBase58();
+    const out: Ev[] = [];
+    txs.forEach((tx, i) => {
+      if (!tx) return;
+      const ctx = ctxOf.get(sigs[i]);
+      const ev = ctx ? classify(tx, ctx) : burnEv(tx);
+      if (ev && ev.actor === me) out.push(ev);
+    });
+    return out.sort((a, b) => b.ts - a.ts).slice(0, 60);
   });
-  return out.sort((a, b) => b.ts - a.ts).slice(0, 60);
-}
 
 // ---------- leaderboards ----------
 export type Holder = { owner: string; tokens: number; valueUsd: number | null; redeemUsd: number | null; share: number };
 export type Board = { market: string; ticker: string; sides: [Holder[], Holder[]]; leverage: [number, number] };
 
-export async function marketLeaders(key: PublicKey): Promise<Board> {
+export const marketLeaders = (key: PublicKey): Promise<Board> => memo(`feed:leaders:${key.toBase58()}`, BOARD_TTL, BOARD_STALE, () => loadMarketLeaders(key));
+async function loadMarketLeaders(key: PublicKey): Promise<Board> {
   const c = conn();
   const [ctx, card] = await Promise.all([marketCtx(key), readMarketCard(key, false)]);
   const sides = await Promise.all(
@@ -275,7 +283,8 @@ export async function marketLeaders(key: PublicKey): Promise<Board> {
 }
 
 export type Wallet = { owner: string; valueUsd: number; positions: number; biggest: { ticker: string; side: 0 | 1; valueUsd: number } | null };
-export async function globalLeaders(): Promise<Wallet[]> {
+export const globalLeaders = (): Promise<Wallet[]> => memo("feed:leaders", BOARD_TTL, BOARD_STALE, loadGlobalLeaders);
+async function loadGlobalLeaders(): Promise<Wallet[]> {
   const [markets, bots] = await Promise.all([allMarkets(), botAddresses()]);
   const boards = await Promise.all(markets.map((m) => marketLeaders(m).catch(() => null)));
   const agg = new Map<string, Wallet>();
@@ -295,28 +304,86 @@ export async function globalLeaders(): Promise<Wallet[]> {
   return [...agg.values()].sort((a, b) => b.valueUsd - a.valueUsd).slice(0, 20);
 }
 
-/** Every event on one market since `since` (unix s): signatures newest-first, paged until we cross the cutoff. `drop` skips whole txs. */
-async function marketEventsSince(key: PublicKey, since: number, drop?: (tx: ParsedTransactionWithMeta) => boolean, maxSigs = 3000): Promise<Ev[]> {
-  const c = conn();
-  const ctx = await marketCtx(key);
-  const sigs: string[] = [];
-  let before: string | undefined;
-  while (sigs.length < maxSigs) {
-    const page = await c.getSignaturesForAddress(key, { limit: 1000, before });
-    let crossed = false;
+/** Per-market event buffer for the activity scan: `evs` newest-first, covering everything from `since` up to the newest signature
+ *  seen. Refreshes fetch only what landed after `newest` (`until`); a wider window than before back-fills from `oldest`. */
+type EvBuf = { evs: Ev[]; newest?: string; oldest?: string; since: number; pending: string[] };
+const evBufs = new Map<string, EvBuf>();
+const evBufLocks = new Map<string, Promise<unknown>>();
+const EV_BUF_KEEP_S = 8 * 86400; // the handler caps `active` at 168 h; keep a week plus a day of slack
+const EV_BUF_MAX = 20_000;
+
+/** Signatures of `key` newest-first between `until` (exclusive, newer bound) and the `since` cutoff / `before` start; `maxSigs` bounds a pass. */
+async function sigRange(c: Connection, key: PublicKey, o: { before?: string; until?: string; since: number; maxSigs: number }) {
+  const rows: { signature: string; err: boolean }[] = [];
+  let before = o.before;
+  let crossed = false;
+  while (rows.length < o.maxSigs) {
+    const page = await c.getSignaturesForAddress(key, { limit: 1000, before, until: o.until });
     for (const s of page) {
-      if ((s.blockTime ?? 0) < since) {
+      if ((s.blockTime ?? 0) < o.since) {
         crossed = true;
         break;
       }
-      if (!s.err) sigs.push(s.signature);
+      rows.push({ signature: s.signature, err: !!s.err });
     }
     if (crossed || page.length < 1000) break;
     before = page[page.length - 1].signature;
   }
-  const txs: (ParsedTransactionWithMeta | null)[] = [];
-  for (let i = 0; i < sigs.length; i += 100) txs.push(...(await c.getParsedTransactions(sigs.slice(i, i + 100), { maxSupportedTransactionVersion: 0 })));
-  return txs.map((t) => (t && !drop?.(t) ? classify(t, ctx) : null)).filter((e): e is Ev => !!e);
+  return rows;
+}
+
+/** Every event on one market since `since` (unix s). `drop` skips whole txs. Incremental per market (see EvBuf). */
+async function marketEventsSince(key: PublicKey, since: number, drop?: (tx: ParsedTransactionWithMeta) => boolean, maxSigs = 3000): Promise<Ev[]> {
+  const k = key.toBase58();
+  // one refresh per market at a time: concurrent callers (different windows) queue on the same buffer
+  const prev = evBufLocks.get(k) ?? Promise.resolve();
+  const run = prev.catch(() => {}).then(() => refreshEvents(key, since, drop, maxSigs));
+  evBufLocks.set(k, run);
+  run.finally(() => evBufLocks.get(k) === run && evBufLocks.delete(k)).catch(() => {});
+  return run;
+}
+async function refreshEvents(key: PublicKey, since: number, drop: ((tx: ParsedTransactionWithMeta) => boolean) | undefined, maxSigs: number): Promise<Ev[]> {
+  const c = conn();
+  const k = key.toBase58();
+  const ctx = await marketCtx(key);
+  const buf: EvBuf = evBufs.get(k) ?? { evs: [], since, pending: [] };
+  const parse = async (sigs: string[]) => {
+    const txs = await parsedTxs(c, sigs);
+    const out: Ev[] = [];
+    const missing: string[] = [];
+    txs.forEach((t, i) => {
+      if (!t) return void missing.push(sigs[i]); // not indexed yet: ask again next pass
+      const e = !drop?.(t) ? classify(t, ctx) : null;
+      if (e) out.push(e);
+    });
+    return { out, missing };
+  };
+  // forward: everything newer than the newest signature already folded in (first pass: the whole window)
+  const fwd = await sigRange(c, key, { until: buf.newest, since: buf.newest ? 0 : since, maxSigs });
+  const fresh = await parse([...buf.pending, ...fwd.filter((r) => !r.err).map((r) => r.signature)]);
+  buf.pending = fresh.missing.slice(0, 200);
+  let evs = [...fresh.out, ...buf.evs];
+  if (fwd.length) {
+    buf.newest = fwd[0].signature;
+    buf.oldest ??= fwd[fwd.length - 1].signature;
+  }
+  // back-fill: a wider window than the buffer covers
+  if (since < buf.since && buf.oldest) {
+    const back = await sigRange(c, key, { before: buf.oldest, since, maxSigs });
+    const older = await parse(back.filter((r) => !r.err).map((r) => r.signature));
+    evs = [...evs, ...older.out];
+    if (back.length) buf.oldest = back[back.length - 1].signature;
+    buf.since = since;
+  }
+  const seen = new Set<string>();
+  const keep = Math.floor(Date.now() / 1000) - EV_BUF_KEEP_S;
+  buf.evs = evs
+    .filter((e) => e.ts >= keep && !seen.has(e.sig) && seen.add(e.sig))
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, EV_BUF_MAX);
+  buf.since = Math.max(buf.since, keep);
+  evBufs.set(k, buf);
+  return buf.evs.filter((e) => e.ts >= since);
 }
 
 export type Active = {
@@ -331,7 +398,8 @@ export type Active = {
 };
 
 /** Who actually traded in the window, closed positions included — the bags board only sees what is still held. */
-export async function activeWallets(hours = 24): Promise<Active[]> {
+export const activeWallets = (hours = 24): Promise<Active[]> => memo(`feed:active:${hours}`, BOARD_TTL, 300_000, () => loadActiveWallets(hours));
+async function loadActiveWallets(hours: number): Promise<Active[]> {
   const since = Math.floor(Date.now() / 1000) - hours * 3600;
   const [markets, bots] = await Promise.all([allMarkets(), botAddresses()]);
   // a tx that touches a vault is vault plumbing (keeper rebalance, park-and-deploy hedge) whoever paid for it

@@ -7,6 +7,7 @@ import satori from "satori";
 import { Resvg } from "@resvg/resvg-js";
 import sharp from "sharp";
 import { getAsset } from "./das.js";
+import { memo } from "./memo.js";
 
 const PROGRAM_ID = new PublicKey(process.env.VITE_PROGRAM_ID ?? "T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb");
 const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
@@ -113,10 +114,12 @@ export async function solUsd(): Promise<number | null> {
     return lastSol?.v ?? null; // last good price beats a blank leaderboard
   }
 }
-async function lstRate(c: Connection): Promise<number> {
-  const d = (await c.getAccountInfo(POOL))!.data;
-  return Number(u64(d, 258)) / Number(u64(d, 266));
-}
+/** SOL per r-fstacc from the stake pool account: moves by epoch, read at most every 20 s. */
+const lstRate = (c: Connection): Promise<number> =>
+  memo("og:lstRate", 20_000, 120_000, async () => {
+    const d = (await c.getAccountInfo(POOL))!.data;
+    return Number(u64(d, 258)) / Number(u64(d, 266));
+  });
 
 export type Side = {
   symbol: string;
@@ -231,7 +234,10 @@ async function tokenImage(url: string | null): Promise<string | null> {
   }
 }
 
-export async function readMarketCard(key: PublicKey, withImage = true): Promise<MarketCard> {
+/** One market's card data: 10 s fresh, a minute stale. Shared by /api/og, /api/page (every /m/:key view) and the leaderboards. */
+export const readMarketCard = (key: PublicKey, withImage = true): Promise<MarketCard> =>
+  memo(`og:card:${key.toBase58()}:${withImage ? 1 : 0}`, 10_000, 60_000, () => loadMarketCard(key, withImage));
+async function loadMarketCard(key: PublicKey, withImage: boolean): Promise<MarketCard> {
   const c = conn();
   const mi = await c.getAccountInfo(key);
   if (!mi || mi.data.length !== MARKET_LEN) throw new Error("market not found");
@@ -303,7 +309,8 @@ export async function readBalance(owner: PublicKey, mint: PublicKey): Promise<bi
 }
 
 export type Position = { market: MarketCard; side: 0 | 1; amount: bigint; valueUsd: number | null; redeemUsd: number | null };
-export async function readPortfolio(owner: PublicKey): Promise<Position[]> {
+export const readPortfolio = (owner: PublicKey): Promise<Position[]> => memo(`og:portfolio:${owner.toBase58()}`, 10_000, 60_000, () => loadPortfolio(owner));
+async function loadPortfolio(owner: PublicKey): Promise<Position[]> {
   const c = conn();
   const markets = await c.getProgramAccounts(PROGRAM_ID, { dataSlice: { offset: 8, length: 64 }, filters: [{ dataSize: MARKET_LEN }] });
   const atas = markets.flatMap((m) => [ata(pk(m.account.data, 0), owner), ata(pk(m.account.data, 32), owner)]);

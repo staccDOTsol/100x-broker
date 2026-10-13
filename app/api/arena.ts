@@ -37,6 +37,11 @@ import { HOUSE_WALLET, PROGRAM_ID, RAYDIUM_CLMM, RFSTACC, WSOL } from "../src/co
 import { ARENA } from "../src/arena.js";
 import { activeWallets } from "./_lib/feed.js";
 import { allViews } from "./_lib/views.js";
+import { memo, peek } from "./_lib/memo.js";
+
+// arena memo windows (ms): 15 s fresh, served stale for two minutes while one background refresh runs
+const TTL = 15_000;
+const STALE = 120_000;
 
 const MIN_SOL = 0.001;
 const MAX_SOL = 5;
@@ -89,22 +94,21 @@ const sideRow = (s: MarketView["side"][0]) => ({
   at_floor: s.atFloor,
   circulating: Number(s.circulating) / 10 ** s.decimals,
 });
-/** Oracle pool depth (USD) for every market's oracle, one Raydium call, cached 5 min. Thin pools make 100× a coin flip that wipes a side every hour. */
-let depth: { at: number; v: Map<string, number> } | null = null;
+/** Oracle pool depth (USD) for every market's oracle, one Raydium call, cached 5 min (an hour stale). Thin pools make 100× a coin flip that wipes a side every hour. */
 const THIN_ORACLE_USD = 25_000;
-async function oracleDepths(all: MarketView[]) {
-  if (depth && Date.now() - depth.at < 300_000) return depth.v;
-  const ids = [...new Set(all.map((v) => v.keys.oraclePool.toBase58()))];
-  const m = new Map<string, number>();
-  try {
-    const r = await fetch(`https://api-v3.raydium.io/pools/info/ids?ids=${ids.join(",")}`);
-    const j: any = await r.json();
-    for (const p of j?.data ?? []) if (p?.id) m.set(p.id, Number(p.tvl ?? 0));
-  } catch {
-    /* no depth, no flag */
-  }
-  depth = { at: Date.now(), v: m };
-  return m;
+function oracleDepths(all: MarketView[]) {
+  const ids = [...new Set(all.map((v) => v.keys.oraclePool.toBase58()))].sort();
+  return memo(`arena:depth:${ids.join(",")}`, 300_000, 3_600_000, async () => {
+    const m = new Map<string, number>();
+    try {
+      const r = await fetch(`https://api-v3.raydium.io/pools/info/ids?ids=${ids.join(",")}`);
+      const j: any = await r.json();
+      for (const p of j?.data ?? []) if (p?.id) m.set(p.id, Number(p.tvl ?? 0));
+    } catch {
+      /* no depth, no flag */
+    }
+    return m;
+  });
 }
 const oracleRisk = (tvl: number | undefined) => (tvl === undefined ? null : tvl < THIN_ORACLE_USD ? `thin oracle ($${Math.round(tvl)} in the pool): hourly moves of 10–100% happen, any hour can wipe a side` : null);
 const listRow = (v: MarketView, tvl?: number) => ({
@@ -120,24 +124,22 @@ const listRow = (v: MarketView, tvl?: number) => ({
 });
 
 // ---------- vaults (/yield) ----------
-let vcache: { at: number; v: VaultView[] } | null = null;
 const born = new Map<string, number | null>();
-async function vaults(): Promise<VaultView[]> {
-  if (vcache && Date.now() - vcache.at < 60_000) return vcache.v;
-  const list = await retry(listVaults);
-  const out: VaultView[] = [];
-  for (const v of list) {
-    try {
-      const k = v.key.toBase58();
-      if (!born.has(k)) born.set(k, await vaultCreatedTs(v.key).catch(() => null));
-      out.push(await retry(() => loadVault(v, born.get(k) ?? null)));
-    } catch {
-      /* a vault that won't load just stays off the list */
+const vaults = (): Promise<VaultView[]> =>
+  memo("arena:vaults", TTL, STALE, async () => {
+    const list = await retry(listVaults);
+    const out: VaultView[] = [];
+    for (const v of list) {
+      try {
+        const k = v.key.toBase58();
+        if (!born.has(k)) born.set(k, await vaultCreatedTs(v.key).catch(() => null));
+        out.push(await retry(() => loadVault(v, born.get(k) ?? null)));
+      } catch {
+        /* a vault that won't load just stays off the list */
+      }
     }
-  }
-  vcache = { at: Date.now(), v: out };
-  return out;
-}
+    return out;
+  });
 /** `VaultView.underlying` is the mint; the human ticker lives on the market. */
 let tickers = new Map<string, string>();
 let stems = new Map<string, string>();
@@ -241,14 +243,11 @@ async function book(owner: PublicKey, all: MarketView[], pool: PoolState, vs: Va
 }
 
 // ---------- activity (trade counts): slow scan, refreshed in the background, served stale ----------
-let act: { at: number; v: Awaited<ReturnType<typeof activeWallets>> } = { at: 0, v: [] };
-let actRun: Promise<void> | null = null;
-async function activity() {
-  if (Date.now() - act.at > 60_000 && !actRun) {
-    actRun = activeWallets(72).then((v) => { act = { at: Date.now(), v }; }).catch(() => {}).finally(() => { actRun = null; });
-  }
-  if (actRun && act.at === 0) await Promise.race([actRun, new Promise((r) => setTimeout(r, 8_000))]);
-  return act.v;
+type Activity = Awaited<ReturnType<typeof activeWallets>>;
+async function activity(): Promise<Activity> {
+  // the scan itself is incremental and memoized in api/_lib/feed.ts; this only bounds how long a cold board waits for it
+  const p = memo<Activity>("arena:activity", 60_000, 600_000, () => activeWallets(72)).catch(() => peek<Activity>("arena:activity") ?? []);
+  return Promise.race([p, sleep(8_000).then(() => peek<Activity>("arena:activity") ?? [])]);
 }
 
 /** Activity = transactions the wallet has signed, minus the one that funded it. One cheap call, same answer on every instance. */
@@ -263,9 +262,8 @@ async function tradeCount(wallet: string) {
 }
 
 // ---------- leaderboard ----------
-let bcache: { at: number; v: unknown } | null = null;
-async function board() {
-  if (bcache && Date.now() - bcache.at < 20_000) return bcache.v;
+const board = () => memo("arena:board", TTL, STALE, loadBoard);
+async function loadBoard() {
   // trade counts are garnish: give the (slow) activity scan a few seconds, then go without
   const p = await pool();
   const all = await markets();
@@ -288,9 +286,7 @@ async function board() {
     const open = rows.reduce((t, a) => t + a.positions.length + a.vaults.length, 0);
     return { name, agents: rows.length, seed_sol: seed, equity_sol: equity, net_sol: equity - seed, ret: seed > 0 ? (equity - seed) / seed : 0, trades: rows.reduce((t, a) => t + a.trades, 0), open_positions: open, leader: rows[0]?.name ?? null, laggard: rows[rows.length - 1]?.name ?? null, since: rows.map((a) => a.joined).sort()[0] ?? ARENA.since };
   });
-  const v = { since: ARENA.since, rules: ARENA.rules, cohorts, agents, marked: "equity = SOL + r-fstacc×rate + each bag at what Sell pays right now (curve, pot, or both) + vault receipts at share price" };
-  bcache = { at: Date.now(), v };
-  return v;
+  return { since: ARENA.since, rules: ARENA.rules, cohorts, agents, marked: "equity = SOL + r-fstacc×rate + each bag at what Sell pays right now (curve, pot, or both) + vault receipts at share price" };
 }
 
 // ---------- builders (unsigned v0 transactions, same instructions as the site's ticket) ----------
@@ -723,7 +719,7 @@ async function keeperWork() {
   const vk = await Promise.all(vs.map(async (w) => ({ ticker: await vaultTicker(w), vault: w.v.key.toBase58(), hedge_error_bps: Number(w.x.errBps), band_bps: w.v.bandBps, outside_band: Number(w.x.errBps) > w.v.bandBps, free_sol: Number(w.x.free) / 1e9, keeper_bps: w.v.keeperBps })));
   return { markets: mk, vaults: vk, how: { poke: "moves the pending pot transfer (anyone; no bounty, but it is what makes your side get paid)", settle: "sells the losing side's escrow into its curve for the winner (anyone)", claim: "pulls a side's unclaimed curve fees into the pots (anyone)", rebalance: "vault keeper: not exposed yet — the house keeper does it; keeper_bps is what a rebalance earns" } };
 }
-let kcache: { at: number; v: unknown } | null = null;
+const keeper = () => memo("arena:keeper", TTL, STALE, keeperWork);
 const buildPoke = async (payer: PublicKey, v: MarketView) => ({ tx: b64(await toV0([cu(200_000), pokeIx(v.keys)], payer)), summary: { kind: "poke", ticker: v.ticker, market: v.acct.key.toBase58(), pending: v.pending ? { pays: v.pending.payer ? "DOWN" : "UP", amount_rfstacc: Number(v.pending.amount) / 1e9 } : null } });
 async function buildSettle(payer: PublicKey, v: MarketView, side: 0 | 1) {
   if (!((await settleAmount(v, side)) > 0n)) throw new Error(`${side ? "DOWN" : "UP"} on ${v.ticker} has nothing to settle right now`);
@@ -745,19 +741,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (req.query.list !== undefined) {
         const all = await markets();
         const d = await oracleDepths(all);
-        return res.setHeader("cache-control", "public, max-age=10, s-maxage=20").json({ markets: all.map((v) => listRow(v, d.get(v.keys.oraclePool.toBase58()))), thin_oracle_usd: THIN_ORACLE_USD });
+        return res.setHeader("cache-control", "public, max-age=10, s-maxage=20, stale-while-revalidate=60").json({ markets: all.map((v) => listRow(v, d.get(v.keys.oraclePool.toBase58()))), thin_oracle_usd: THIN_ORACLE_USD });
       }
       if (req.query.pools) {
         const mint = new PublicKey(String(req.query.pools));
         const [asset, rows] = await Promise.all([getAsset(mint.toBase58()).catch(() => null), oracleCandidates(mint)]);
-        return res.setHeader("cache-control", "public, max-age=10, s-maxage=20").json({ mint: mint.toBase58(), underlying: asset, pools: poolsOut(rows), next: rows.some((r) => r.quote === "SOL") ? "create-market <pool>" : "create-pool <mint> <sol>" });
+        return res.setHeader("cache-control", "public, max-age=10, s-maxage=20, stale-while-revalidate=60").json({ mint: mint.toBase58(), underlying: asset, pools: poolsOut(rows), next: rows.some((r) => r.quote === "SOL") ? "create-market <pool>" : "create-pool <mint> <sol>" });
       }
       if (req.query.keeper !== undefined) {
-        if (!kcache || Date.now() - kcache.at > 30_000) kcache = { at: Date.now(), v: await keeperWork() };
-        return res.setHeader("cache-control", "public, max-age=10, s-maxage=30").json(kcache.v);
+        return res.setHeader("cache-control", "public, max-age=10, s-maxage=30, stale-while-revalidate=60").json(await keeper());
       }
       if (req.query.vaults !== undefined) {
-        return res.setHeader("cache-control", "public, max-age=15, s-maxage=30").json({ vaults: await Promise.all((await vaults()).map(vaultRow)) });
+        return res.setHeader("cache-control", "public, max-age=15, s-maxage=30, stale-while-revalidate=60").json({ vaults: await Promise.all((await vaults()).map(vaultRow)) });
       }
       if (req.query.who) {
         const owner = new PublicKey(String(req.query.who));
