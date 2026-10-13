@@ -4,8 +4,9 @@ use {
         cpi,
         error::HookedError,
         math::*,
-        oracle,
+        oracle::{self, Point},
         state::*,
+        venue,
     },
     pinocchio::{
         cpi::{Seed, Signer},
@@ -108,9 +109,79 @@ fn pool_sqrt_price(pool: &AccountView) -> Result<u128, ProgramError> {
     read_u128(&d, DBC_POOL_SQRT_PRICE)
 }
 
+/// Sampling-mode read plus the bookkeeping for "no window yet": the sample still becomes a
+/// checkpoint so the next call has something to integrate from.
+fn sample(ring: Option<&[u8]>, m: &mut Market, now: u32, tick: i32) -> Result<Option<(Point, i64)>, ProgramError> {
+    let (end, twap) = oracle::read_sampled(ring, m, now, tick)?;
+    match twap {
+        Some(t) => Ok(Some((end, t))),
+        None => {
+            if end.ts > m.last_obs_ts {
+                m.push_ckpt(end.ts, end.tick_cumulative);
+                m.last_obs_ts = end.ts;
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// The PumpSwap `Pool` a kind-1 market prices from: owned by PumpSwap, well-formed, and naming the
+/// market's two vault slots. Returns its current `virtual_quote_reserves`.
+fn pumpswap_pool_virtual(ps_pool: &AccountView, base_slot: &Address, quote_slot: &Address) -> Result<i128, ProgramError> {
+    require(ps_pool.owner() == &PUMPSWAP, HookedError::InvalidOracle)?;
+    let d = ps_pool.try_borrow()?;
+    let info = venue::decode_pool(KIND_PUMPSWAP, &d, ps_pool.address().as_array())?;
+    require(
+        &info.slot_obs == base_slot.as_array() && &info.slot_pool == quote_slot.as_array(),
+        HookedError::InvalidOracle,
+    )?;
+    Ok(venue::pumpswap_virtual_quote(&d))
+}
+
+/// Kinds 1-4: checks the slot accounts against the market (address + owner) and returns the venue's
+/// current tick. `obs` is always `Market.oracle_obs`; `pool` is the first trailing account, which
+/// kinds 1 and 2 require (it is the second vault) and kinds 3 and 4 only check when present;
+/// `ps_pool` is the second trailing account, the PumpSwap `Pool`, required by kind 1 only.
+fn venue_tick(
+    m: &Market,
+    obs: &AccountView,
+    pool: Option<&AccountView>,
+    ps_pool: Option<&AccountView>,
+) -> Result<i32, ProgramError> {
+    let kind = m.oracle_kind;
+    match kind {
+        KIND_PUMPSWAP | KIND_RAYDIUM_CPMM => {
+            let p = pool.ok_or(HookedError::InvalidOracle)?;
+            require(p.address() == &m.oracle_pool, HookedError::InvalidOracle)?;
+            require(
+                venue::is_token_program(obs.owner()) && venue::is_token_program(p.owner()),
+                HookedError::InvalidOracle,
+            )?;
+            let (a0, a1) = (token_amount(obs)?, token_amount(p)?);
+            if kind == KIND_PUMPSWAP {
+                let ps = ps_pool.ok_or(HookedError::InvalidOracle)?;
+                let virtual_quote = pumpswap_pool_virtual(ps, &m.oracle_obs, &m.oracle_pool)?;
+                venue::pumpswap_tick(a0, a1, virtual_quote)
+            } else {
+                venue::tick_from_reserves(a0 as u128, a1 as u128)
+            }
+        }
+        KIND_METEORA_DAMM_V2 | KIND_METEORA_DLMM => {
+            if let Some(p) = pool {
+                require(p.address() == &m.oracle_pool, HookedError::InvalidOracle)?;
+            }
+            require(Some(obs.owner()) == venue::program_for(kind), HookedError::InvalidOracle)?;
+            let d = obs.try_borrow()?;
+            venue::pool_tick(kind, &d)
+        }
+        _ => Err(HookedError::InvalidOracleKind.into()),
+    }
+}
+
 /// Moves `1 - 1.0001^(-L·|Δtwap|)` of the losing vault to the winning vault for every new stored
 /// Raydium observation, and accrues the same factor as curve price the loser owes to settle.
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 fn rebalance(
     program_id: &Address,
     market: &mut AccountView,
@@ -119,9 +190,9 @@ fn rebalance(
     vault_bear: &AccountView,
     token_program: &AccountView,
     pool: Option<&AccountView>,
+    ps_pool: Option<&AccountView>,
 ) -> ProgramResult {
     require(market.owner() == program_id, HookedError::InvalidMarket)?;
-    require(obs.owner() == &RAYDIUM_CLMM, HookedError::InvalidOracle)?;
     require(token_program.address() == &TOKENKEG, HookedError::InvalidProgram)?;
     let bal_bull = token_amount(vault_bull)?;
     let bal_bear = token_amount(vault_bear)?;
@@ -134,29 +205,26 @@ fn rebalance(
             vault_bull.address() == &m.vault_bull && vault_bear.address() == &m.vault_bear,
             HookedError::InvalidVault,
         )?;
-        let od = obs.try_borrow()?;
         let now = Clock::get()?.unix_timestamp as u32;
-        // a dead ring + the pool account => sample the pool's tick ourselves
-        let read = match pool {
-            Some(p) if oracle::ring_is_stale(&od, now) => {
-                require(p.address() == &m.oracle_pool && p.owner() == &RAYDIUM_CLMM, HookedError::InvalidOracle)?;
-                let tick = {
-                    let pd = p.try_borrow()?;
-                    i32::from_le_bytes(pd[RAY_POOL_TICK_CURRENT..RAY_POOL_TICK_CURRENT + 4].try_into().unwrap())
-                };
-                let (end, twap) = oracle::read_sampled(&od, m, now, tick)?;
-                match twap {
-                    Some(t) => Some((end, t)),
-                    None => {
-                        if end.ts > m.last_obs_ts {
-                            m.push_ckpt(end.ts, end.tick_cumulative);
-                            m.last_obs_ts = end.ts;
-                        }
-                        None
-                    }
+        let read = if m.oracle_kind == KIND_RAYDIUM_CLMM {
+            require(obs.owner() == &RAYDIUM_CLMM, HookedError::InvalidOracle)?;
+            let od = obs.try_borrow()?;
+            // a dead ring + the pool account => sample the pool's tick ourselves
+            match pool {
+                Some(p) if oracle::ring_is_stale(&od, now) => {
+                    require(p.address() == &m.oracle_pool && p.owner() == &RAYDIUM_CLMM, HookedError::InvalidOracle)?;
+                    let tick = {
+                        let pd = p.try_borrow()?;
+                        i32::from_le_bytes(pd[RAY_POOL_TICK_CURRENT..RAY_POOL_TICK_CURRENT + 4].try_into().unwrap())
+                    };
+                    sample(Some(&od[..]), m, now, tick)?
                 }
+                _ => oracle::read(&od, m)?,
             }
-            _ => oracle::read(&od, m)?,
+        } else {
+            // no ring anywhere: every rebalance samples the venue's current tick
+            let tick = venue_tick(m, obs, pool, ps_pool)?;
+            sample(None, m, now, tick)?
         };
         let Some((end, twap)) = read else {
             return Ok(());
@@ -194,7 +262,10 @@ fn rebalance(
 }
 
 /// Transfer-hook Execute: [source, mint, destination, authority, extra-metas, market, observation,
-/// vault_bull, vault_bear, token program]. Anyone may also call it directly; it only rebalances.
+/// vault_bull, vault_bear, token program, (oracle pool), (pumpswap pool)]. Anyone may also call it
+/// directly; it only rebalances. "observation"/"oracle pool" are the two `Market` oracle slots; for
+/// kinds 1 and 2 they are the venue's two vaults and the sixth extra meta is therefore not optional;
+/// kind 1 also carries the PumpSwap `Pool` as the seventh.
 fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     if accounts.len() < 10 {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -203,10 +274,12 @@ fn execute(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult 
     let [_src, _mint, _dst, _auth, _metas, market, obs, vault_bull, vault_bear, token_program] = head else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
-    rebalance(program_id, market, obs, vault_bull, vault_bear, token_program, tail.first())
+    rebalance(program_id, market, obs, vault_bull, vault_bear, token_program, tail.first(), tail.get(1))
 }
 
-/// [market(w), observation, vault_bull(w), vault_bear(w), token program, (oracle pool)]
+/// [market(w), observation, vault_bull(w), vault_bear(w), token program, (oracle pool), (pumpswap pool)]
+/// The first trailing slot is optional for kind 0 (used when the ring is dead), required for kinds 1-2;
+/// the second is required for kind 1 only.
 fn poke(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     if accounts.len() < 5 {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -215,7 +288,7 @@ fn poke(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
     let [market, obs, vault_bull, vault_bear, token_program] = head else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
-    rebalance(program_id, market, obs, vault_bull, vault_bear, token_program, tail.first())
+    rebalance(program_id, market, obs, vault_bull, vault_bear, token_program, tail.first(), tail.get(1))
 }
 
 fn mint_has_hook(d: &[u8], program_id: &Address) -> bool {
@@ -327,25 +400,26 @@ fn create_meta_list(
     payer: &AccountView,
     meta: &mut AccountView,
     mint: &Address,
-    extras: [(&Address, bool); EXTRA_METAS],
+    extras: &[(&Address, bool)],
 ) -> ProgramResult {
     let (key, bump) = find_pda(&[META_SEED, &mint.as_array()[..]], program_id);
     require(meta.address() == &key, HookedError::InvalidPda)?;
     let bump_b = [bump];
     let seeds = [Seed::from(META_SEED), Seed::from(mint.as_array()), Seed::from(&bump_b)];
+    let len = meta_list_len(extras.len());
     cpi::create_pda_account(
         system,
         payer,
         meta,
-        META_LIST_LEN as u64,
+        len as u64,
         program_id,
-        rent.try_minimum_balance(META_LIST_LEN)?,
+        rent.try_minimum_balance(len)?,
         &[Signer::from(&seeds)],
     )?;
     let mut d = meta.try_borrow_mut()?;
     d[..8].copy_from_slice(&EXECUTE_DISC);
-    d[8..12].copy_from_slice(&((4 + 35 * EXTRA_METAS) as u32).to_le_bytes());
-    d[12..16].copy_from_slice(&(EXTRA_METAS as u32).to_le_bytes());
+    d[8..12].copy_from_slice(&((4 + 35 * extras.len()) as u32).to_le_bytes());
+    d[12..16].copy_from_slice(&(extras.len() as u32).to_le_bytes());
     for (i, (addr, writable)) in extras.iter().enumerate() {
         let o = 16 + 35 * i;
         d[o] = 0; // fixed address
@@ -358,10 +432,17 @@ fn create_meta_list(
 
 /// Permissionless. The market PDA commits to both mints, the oracle and the window, and must be
 /// each mint's authority (DBC `PartnerUpdateAndMintAuthority` with fee_claimer = market).
-/// data: window_secs u32 | underlying_is_token0 u8
+/// data: window_secs u32 | underlying_is_token0 u8 | oracle_kind u8 (absent = 0, Raydium CLMM)
+/// accounts: the 21 below, then for kinds 1 and 2 the venue pool account (PumpSwap `Pool` /
+/// Raydium CPMM `PoolState`) whose vaults the two oracle slots must be. Kinds 3 and 4 pass the
+/// pool itself in both slots. Kind 1 also records the PumpSwap `Pool` as a 7th extra account meta.
 fn create_market(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
-    let [payer, market, vault_bull, vault_bear, bull_mint, bear_mint, pool_bull, pool_bear, bv_bull, bv_bear, qv_bull, qv_bear, quote_mint, esc_bull, esc_bear, meta_bull, meta_bear, oracle_pool, oracle_obs, system, token_program, ..] =
-        accounts
+    if accounts.len() < 21 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    let (head, tail) = accounts.split_at_mut(21);
+    let [payer, market, vault_bull, vault_bear, bull_mint, bear_mint, pool_bull, pool_bear, bv_bull, bv_bear, qv_bull, qv_bear, quote_mint, esc_bull, esc_bear, meta_bull, meta_bear, oracle_pool, oracle_obs, system, token_program] =
+        head
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -371,6 +452,8 @@ fn create_market(program_id: &Address, accounts: &mut [AccountView], data: &[u8]
         .ok_or(HookedError::InvalidInstruction)?;
     let flag = *data.get(4).ok_or(HookedError::InvalidInstruction)?;
     require(window > 0 && flag <= 1, HookedError::InvalidInstruction)?;
+    let kind = data.get(5).copied().unwrap_or(KIND_RAYDIUM_CLMM);
+    require(kind <= KIND_MAX, HookedError::InvalidOracleKind)?;
     require(payer.is_signer(), HookedError::MissingSigner)?;
     require(
         system.address() == &SYSTEM && token_program.address() == &TOKENKEG,
@@ -393,11 +476,17 @@ fn create_market(program_id: &Address, accounts: &mut [AccountView], data: &[u8]
     );
     require(market.address() == &market_key, HookedError::InvalidPda)?;
 
-    require(
-        oracle_obs.owner() == &RAYDIUM_CLMM && oracle_pool.owner() == &RAYDIUM_CLMM,
-        HookedError::InvalidOracle,
-    )?;
-    oracle::check_header(&oracle_obs.try_borrow()?, oracle_pool.address())?;
+    // kind 0 keeps the ring; every other kind is verified against its venue pool and sampled now
+    let venue_tick0 = if kind == KIND_RAYDIUM_CLMM {
+        require(
+            oracle_obs.owner() == &RAYDIUM_CLMM && oracle_pool.owner() == &RAYDIUM_CLMM,
+            HookedError::InvalidOracle,
+        )?;
+        oracle::check_header(&oracle_obs.try_borrow()?, oracle_pool.address())?;
+        None
+    } else {
+        Some(check_venue(kind, flag, oracle_obs, oracle_pool, tail.first())?)
+    };
     require(
         quote_mint.address() == &QUOTE_MINT && quote_mint.owner() == &TOKENKEG,
         HookedError::InvalidMint,
@@ -426,6 +515,11 @@ fn create_market(program_id: &Address, accounts: &mut [AccountView], data: &[u8]
     )?;
     create_vault(program_id, &rent, system, token_program, payer, vault_bull, quote_mint, &market_key, SIDE_BULL)?;
     create_vault(program_id, &rent, system, token_program, payer, vault_bear, quote_mint, &market_key, SIDE_BEAR)?;
+    // kind 1 adds the PumpSwap Pool (account 21, already verified) so Execute can read its virtual quote
+    let ps_pool_key = match (kind, tail.first()) {
+        (KIND_PUMPSWAP, Some(p)) => p.address(),
+        _ => &SYSTEM,
+    };
     let extras = [
         (&market_key, true),
         (oracle_obs.address(), false),
@@ -433,7 +527,9 @@ fn create_market(program_id: &Address, accounts: &mut [AccountView], data: &[u8]
         (vault_bear.address(), true),
         (&TOKENKEG, false),
         (oracle_pool.address(), false),
+        (ps_pool_key, false),
     ];
+    let extras = if kind == KIND_PUMPSWAP { &extras[..EXTRA_METAS_PUMPSWAP] } else { &extras[..EXTRA_METAS] };
     let bull_key = bull_mint.address().clone();
     let bear_key = bear_mint.address().clone();
     create_meta_list(program_id, &rent, system, payer, meta_bull, &bull_key, extras)?;
@@ -460,18 +556,28 @@ fn create_market(program_id: &Address, accounts: &mut [AccountView], data: &[u8]
     m.window_secs = window;
     m.underlying_is_token0 = flag;
     m.bump = bump;
-    let od = oracle_obs.try_borrow()?;
+    m.oracle_kind = kind;
     let now = Clock::get()?.unix_timestamp as u32;
-    let (end, twap) = if oracle::ring_is_stale(&od, now) {
-        // dead ring: start from the pool's own tick, sampling takes over from here
-        let tick = {
-            let pd = oracle_pool.try_borrow()?;
-            i32::from_le_bytes(pd[RAY_POOL_TICK_CURRENT..RAY_POOL_TICK_CURRENT + 4].try_into().unwrap())
-        };
-        let (end, t) = oracle::read_sampled(&od, m, now, tick)?;
-        (end, t.unwrap_or((tick as i64) << 32))
-    } else {
-        oracle::read(&od, m)?.ok_or(HookedError::OracleWindowEmpty)?
+    let (end, twap) = match venue_tick0 {
+        Some(tick) => {
+            // kinds 1-4: the sampled tick is the baseline; the first checkpoint anchors the window
+            let (end, t) = oracle::read_sampled(None, m, now, tick)?;
+            (end, t.unwrap_or((tick as i64) << 32))
+        }
+        None => {
+            let od = oracle_obs.try_borrow()?;
+            if oracle::ring_is_stale(&od, now) {
+                // dead ring: start from the pool's own tick, sampling takes over from here
+                let tick = {
+                    let pd = oracle_pool.try_borrow()?;
+                    i32::from_le_bytes(pd[RAY_POOL_TICK_CURRENT..RAY_POOL_TICK_CURRENT + 4].try_into().unwrap())
+                };
+                let (end, t) = oracle::read_sampled(Some(&od[..]), m, now, tick)?;
+                (end, t.unwrap_or((tick as i64) << 32))
+            } else {
+                oracle::read(&od, m)?.ok_or(HookedError::OracleWindowEmpty)?
+            }
+        }
     };
     m.last_twap_q32 = twap;
     m.last_obs_ts = end.ts;
@@ -479,10 +585,68 @@ fn create_market(program_id: &Address, accounts: &mut [AccountView], data: &[u8]
     Ok(())
 }
 
+/// create_market for kinds 1-4: the venue pool must be owned by its program and decode to the two
+/// slot addresses the client passed; its mints must be {underlying, WSOL|USDC|USDT} with the quote on
+/// the side `flag` says. Returns the venue's current tick (the market's starting TWAP).
+fn check_venue(
+    kind: u8,
+    flag: u8,
+    obs: &AccountView,
+    pool_slot: &AccountView,
+    venue_pool: Option<&AccountView>,
+) -> Result<i32, ProgramError> {
+    let program = venue::program_for(kind).ok_or(HookedError::InvalidOracleKind)?;
+    let (info, tick) = match kind {
+        KIND_PUMPSWAP | KIND_RAYDIUM_CPMM => {
+            let vp = venue_pool.ok_or(ProgramError::NotEnoughAccountKeys)?;
+            require(vp.owner() == program, HookedError::InvalidOracle)?;
+            let (info, virtual_quote) = {
+                let d = vp.try_borrow()?;
+                (venue::decode_pool(kind, &d, vp.address().as_array())?, venue::pumpswap_virtual_quote(&d))
+            };
+            require(
+                venue::is_token_program(obs.owner()) && venue::is_token_program(pool_slot.owner()),
+                HookedError::InvalidOracle,
+            )?;
+            // the slots are token accounts holding exactly the pool's two mints
+            let a0 = {
+                let d = obs.try_borrow()?;
+                require(read_address(&d, 0)? == &info.mint0, HookedError::InvalidOracle)?;
+                token_amount_bytes(&d)?
+            };
+            let a1 = {
+                let d = pool_slot.try_borrow()?;
+                require(read_address(&d, 0)? == &info.mint1, HookedError::InvalidOracle)?;
+                token_amount_bytes(&d)?
+            };
+            let tick = if kind == KIND_PUMPSWAP {
+                venue::pumpswap_tick(a0, a1, virtual_quote)?
+            } else {
+                venue::tick_from_reserves(a0 as u128, a1 as u128)?
+            };
+            (info, tick)
+        }
+        _ => {
+            require(obs.address() == pool_slot.address() && obs.owner() == program, HookedError::InvalidOracle)?;
+            let d = obs.try_borrow()?;
+            let info = venue::decode_pool(kind, &d, obs.address().as_array())?;
+            let tick = venue::pool_tick(kind, &d)?;
+            (info, tick)
+        }
+    };
+    require(
+        &info.slot_obs == obs.address().as_array() && &info.slot_pool == pool_slot.address().as_array(),
+        HookedError::InvalidOracle,
+    )?;
+    require(venue::underlying_flag(&info.mint0, &info.mint1, flag)? == flag, HookedError::UnderlyingFlagMismatch)?;
+    Ok(tick)
+}
+
 /// Burn BULL/BEAR for a pro-rata share of that side's vault, minus REDEEM_FEE_BPS. The fee stays
 /// in the vaults; FUNDING_SHARE_BPS of it moves to the other vault if that one is smaller.
 /// [user(s), user_token(w), mint(w), user_quote(w), market(w), observation, vault_bull(w),
-///  vault_bear(w), dbc_base_vault, token program, token-2022]; data: side u8 | amount u64
+///  vault_bear(w), dbc_base_vault, token program, token-2022, burn_vault(w), dev_ata(w),
+///  (oracle pool), (pumpswap pool)]; data: side u8 | amount u64
 fn redeem(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     if accounts.len() < 13 {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -491,14 +655,13 @@ fn redeem(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> Pr
     let [user, user_token, mint, user_quote, market, obs, vault_bull, vault_bear, base_vault, token_program, token_2022, burn_vault, dev_ata] = head else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
-    let oracle_pool = tail.first();
     let side = side_arg(data)?;
     let amount = amount_arg(data, 1)?;
     require(amount > 0, HookedError::ZeroAmount)?;
     require(user.is_signer(), HookedError::MissingSigner)?;
     require(token_2022.address() == &TOKEN_2022, HookedError::InvalidProgram)?;
 
-    rebalance(program_id, market, obs, vault_bull, vault_bear, token_program, oracle_pool)?;
+    rebalance(program_id, market, obs, vault_bull, vault_bear, token_program, tail.first(), tail.get(1))?;
 
     let seeds = {
         let d = market.try_borrow()?;
@@ -542,7 +705,8 @@ fn redeem(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> Pr
 /// `amount` of the losing side from escrow into its curve with proceeds to the winning vault,
 /// settle_end]. Mints `amount` to the escrow and approves the caller to sell exactly that.
 /// [caller(s), market(w), observation, vault_bull(w), vault_bear(w), token program, token-2022,
-///  mint(w), escrow(w), dbc_pool, instructions sysvar]; data: side u8 | amount u64
+///  mint(w), escrow(w), dbc_pool, instructions sysvar, (oracle pool), (pumpswap pool)];
+/// data: side u8 | amount u64
 fn settle_begin(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     if accounts.len() < 11 {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -551,14 +715,13 @@ fn settle_begin(program_id: &Address, accounts: &mut [AccountView], data: &[u8])
     let [caller, market, obs, vault_bull, vault_bear, token_program, token_2022, mint, escrow, pool, ix_sysvar] = head else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
-    let oracle_pool = tail.first();
     let side = side_arg(data)?;
     let amount = amount_arg(data, 1)?;
     require(amount > 0, HookedError::ZeroAmount)?;
     require(caller.is_signer(), HookedError::MissingSigner)?;
     require(token_2022.address() == &TOKEN_2022, HookedError::InvalidProgram)?;
 
-    rebalance(program_id, market, obs, vault_bull, vault_bear, token_program, oracle_pool)?;
+    rebalance(program_id, market, obs, vault_bull, vault_bear, token_program, tail.first(), tail.get(1))?;
 
     let winner_vault = if side == SIDE_BULL { &*vault_bear } else { &*vault_bull };
     let vault_pre = token_amount(winner_vault)?;
