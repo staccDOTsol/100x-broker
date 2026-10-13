@@ -260,15 +260,23 @@ function Leaderboard({ data, me }: { data: Feed; me?: string }) {
         </div>
       </div>
       {raceTab ? (
-        live ? (
-          <RankRows rows={live.leaders} prizes={live.prizes_sol} me={me} when="this race" />
-        ) : (
-          <>
-            {race.last && <RankRows rows={race.last.leaders} prizes={race.last.prizes_sol} me={me} when="last race" />}
-            <p className="meta">rolling 24h</p>
-            <RankRows rows={race.rolling ?? []} me={me} when="this 24h" />
-          </>
-        )
+        <>
+          {/* race standings (prizes) when anyone has scored this round; the 24h board itself always renders so the chip never lies */}
+          {live && live.leaders.length > 0 && (
+            <>
+              <p className="meta">this race</p>
+              <RankRows rows={live.leaders} prizes={live.prizes_sol} me={me} when="this race" />
+            </>
+          )}
+          {!live && race.last && race.last.leaders.length > 0 && (
+            <>
+              <p className="meta">last race</p>
+              <RankRows rows={race.last.leaders} prizes={race.last.prizes_sol} me={me} when="last race" />
+            </>
+          )}
+          <p className="meta">rolling 24h</p>
+          <RankRows rows={data.boards?.["24h"] ?? race.rolling ?? []} me={me} when="this 24h" />
+        </>
       ) : kind === "pnl" ? (
         <RankRows rows={data.boards?.[period] ?? []} me={me} when={when} />
       ) : (
