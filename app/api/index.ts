@@ -16,7 +16,7 @@ const spec = {
       "Nothing here signs anything: trade endpoints return **unsigned** transactions you sign and send yourself " +
       "(the CLI at `/cli/x100.mjs` does exactly that). Reads are cached at the edge for 10–30 s.\n\n" +
       "**Walkthrough: listing any Solana coin** (each step is one `kind` on `POST /api/arena`):\n" +
-      "1. `GET /api/arena?pools=<mint>` — does it have a Raydium CLMM pool against SOL/USDC/USDT? That pool is the oracle.\n" +
+      "1. `GET /api/arena?pools=<mint>` — does it have a pool against SOL/USDC/USDT on Raydium CLMM, Raydium CPMM, PumpSwap, Meteora DAMM v2 or DLMM? That pool is the oracle.\n" +
       "2. No SOL pool → `create-pool` (buys the coin on Jupiter if you hold none, creates the pool at its current price), then `seed-pool` (one wide LP position). Trade a hair in it; the oracle needs observations.\n" +
       "3. `create-market` — four transactions: curve config, UP curve, DOWN curve, market. Returns `keys`; pass them back to resume if a step fails.\n" +
       "4. `create-vault` — a delta-neutral /yield vault over the oracle pool's live tick range (SOL-quoted oracles only). Park ≥0.3 SOL for it to open a position.\n" +
@@ -38,7 +38,7 @@ const spec = {
           q("who", "wallet address: SOL, loose r-fstacc, positions, vault receipts, equity in SOL"),
           q("list", "any value: list markets"),
           q("vaults", "any value: list /yield vaults"),
-          q("pools", "a token mint: its Raydium CLMM pools, oracle health, existing markets (step 1 of listing a coin)"),
+          q("pools", "a token mint: its pools on every supported venue (CLMM, CPMM, PumpSwap, DAMM v2, DLMM), oracle depth, existing markets (step 1 of listing a coin)"),
           q("keeper", "any value: what needs doing — pending pokes, settle amounts, unclaimed fees, vaults outside their hedge band"),
         ],
         responses: { 200: { description: "JSON", content: { "application/json": { examples: {
@@ -65,7 +65,7 @@ const spec = {
             pct: { type: "number", description: "percent of the holding to exit (sell, unpark); default 100", example: 50 },
             vault: str("vault address, its market, or ticker (park, unpark, finish)", "SI"),
             mint: str("token mint (create-pool; create-market also accepts it)", "3VPoXaRcXxju8qgkVRN87UuXZxbdBD7zyaXPDqqmpump"),
-            pool: str("Raydium CLMM pool (seed-pool; create-market pins the oracle to it)", "ATwrVQsD1mAEQsR5WFoNuomTtWUNTaxmbpzUT3teWZNe"),
+            pool: str("oracle pool on any supported venue (seed-pool; create-market pins the oracle to it)", "ATwrVQsD1mAEQsR5WFoNuomTtWUNTaxmbpzUT3teWZNe"),
             fee_index: { type: "integer", description: "create-pool: Raydium fee tier index (1 = 0.25%, tick spacing 60; default)", example: 1 },
             range: { type: "number", description: "seed-pool: position spans price ÷ range .. price × range (default 4)", example: 4 },
             window: { type: "integer", description: "create-market: oracle TWAP window in seconds (default 3960)", example: 3960 },

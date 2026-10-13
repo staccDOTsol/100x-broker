@@ -3,28 +3,26 @@ import { Link, useNavigate } from "react-router-dom";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction } from "@solana/spl-token";
-import { conn, dbc, marketsForOracle, oracleHealth, quoteSymbolOf, sendRaw, type OracleHealth, type OracleQuote } from "../lib/chain";
+import { conn, dbc, marketsForOracle, oracleHealth, sendRaw, type OracleHealth } from "../lib/chain";
 import { createMarketIx, cu, marketPda, sideAccounts, type MarketKeys } from "../lib/hooked";
+import { MOVE_1PCT, VENUE_LABEL, candidateMove1PctUsd, candidateTvlUsd, decodeVenuePool, discoverPools, quoteSymbolOf, type PoolCandidate } from "../lib/venues";
 import { marketCurve } from "../lib/curve";
 import { humanError } from "../hooks";
+import { usePrices } from "../hooks/price";
 import { useToasts } from "../components/Toasts";
 import { CardShare } from "../components/Share";
+import { RunnerPicks } from "../components/RunnerPicks";
 import { ago, lev, pct, short } from "../lib/format";
 import { getDerivedMeta, getUnderlying, metaUri, type DerivedMeta, type Underlying } from "../lib/das";
 import { shareUrl, tweetUrl } from "../lib/ref";
 import { currentShare, useQuery } from "../lib/url";
-import { DEFAULT_WINDOW_SECS, LEVERAGE, PROGRAM_ID, RAYDIUM_CLMM, REDEEM_FEE, RFSTACC } from "../config";
+import { DEFAULT_WINDOW_SECS, LEVERAGE, PROGRAM_ID, REDEEM_FEE, RFSTACC } from "../config";
 
-type PoolRow = {
-  id: PublicKey;
-  obs: PublicKey;
-  mint0: PublicKey;
-  mint1: PublicKey;
-  quote: OracleQuote;
-  tvl: number;
-  volume24h: number;
-  health: OracleHealth | null;
-};
+/** One oracle candidate: a venue pool (src/lib/venues.ts) plus, for CLMM, its observation-ring health. */
+type PoolRow = PoolCandidate & { health: OracleHealth | null };
+/** AMM venues have no ring to judge; they are usable the moment they hold both reserves. */
+const usable = (p: PoolRow) => (p.venue === "clmm" ? !!p.health?.ok : p.quoteReserve !== null && p.quoteReserve > 0n);
+const usdRound = (x: number | null) => (x === null ? "—" : `$${x.toLocaleString("en-US", { maximumFractionDigits: 0 })}`);
 type StepState = "idle" | "active" | "done" | "failed";
 // Same four on-chain steps, same order; labels are display-only.
 const STEPS = ["Curve config", "UP curve", "DOWN curve", "Market + vaults"];
@@ -37,47 +35,17 @@ const EST_RENT_SOL = 0.04;
 /** Mirrors `marketCurve()` in lib/curve.ts (startingFeeBps = endingFeeBps = 400). */
 const CURVE_FEE_BPS = 400;
 
-/** Raydium v3: CLMM pools containing this mint, deepest first. Filtered to SOL/USDC/USDT quotes. */
-const QUOTE_MINTS = ["So11111111111111111111111111111111111111112", "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"];
-async function raydiumPools(mint: PublicKey): Promise<Omit<PoolRow, "obs" | "health">[]> {
-  // one query per quote: a coin with many meme/meme CLMM pairs pushes its SOL/USDC pools off a liquidity-sorted first page
-  const pages = await Promise.all(
-    QUOTE_MINTS.map(async (q) => {
-      const u = `https://api-v3.raydium.io/pools/info/mint?mint1=${mint.toBase58()}&mint2=${q}&poolType=concentrated&poolSortField=liquidity&sortType=desc&pageSize=12&page=1`;
-      const r = await fetch(u);
-      if (!r.ok) throw new Error("Raydium API unavailable");
-      const j = await r.json();
-      return (j?.data?.data ?? []) as any[];
-    }),
-  );
-  const seen = new Set<string>();
-  const rows: Omit<PoolRow, "obs" | "health">[] = [];
-  for (const p of pages.flat()) {
-    if (seen.has(p.id)) continue;
-    seen.add(p.id);
-    if (p.programId !== RAYDIUM_CLMM.toBase58()) continue;
-    const mint0 = new PublicKey(p.mintA.address);
-    const mint1 = new PublicKey(p.mintB.address);
-    const other = mint0.equals(mint) ? mint1 : mint0;
-    const quote = quoteSymbolOf(other);
-    if (quote === "?") continue;
-    rows.push({ id: new PublicKey(p.id), mint0, mint1, quote, tvl: Number(p.tvl ?? 0), volume24h: Number(p.day?.volume ?? 0) });
-  }
-  return rows.sort((a, b) => b.tvl - a.tvl);
-}
-
-/** Resolve a pasted address: a mint, or a CLMM pool (then the non-quote side is the underlying). */
+/** Resolve a pasted address: a mint, or a pool on any venue (then the non-quote side is the underlying). */
 async function resolveInput(text: string): Promise<{ mint: PublicKey; pinnedPool?: PublicKey }> {
   const key = new PublicKey(text.trim());
   const info = await conn.getAccountInfo(key);
   if (!info) throw new Error("No account at that address.");
-  if (info.owner.equals(RAYDIUM_CLMM)) {
-    const m0 = new PublicKey(info.data.subarray(73, 105));
-    const m1 = new PublicKey(info.data.subarray(105, 137));
-    const mint = quoteSymbolOf(m0) !== "?" ? m1 : m0;
+  const vp = decodeVenuePool(key, info.owner, info.data);
+  if (vp) {
+    const mint = quoteSymbolOf(vp.mint0) !== "?" ? vp.mint1 : vp.mint0;
     return { mint, pinnedPool: key };
   }
-  if (info.data.length < 82) throw new Error("That isn't a token mint or a Raydium CLMM pool.");
+  if (info.data.length < 82) throw new Error("That isn't a token mint or a pool (Raydium CLMM/CPMM, PumpSwap, Meteora DAMM v2/DLMM).");
   return { mint: key };
 }
 
@@ -110,6 +78,7 @@ export default function NewMarket() {
   const { publicKey, signAllTransactions } = useWallet();
   const nav = useNavigate();
   const toasts = useToasts();
+  const { solUsd } = usePrices();
   const q = useQuery();
   const [input, setInputRaw] = useState(() => q.get("pool") ?? q.get("mint") ?? "");
   const setInput = (v: string) => {
@@ -154,27 +123,25 @@ export default function NewMarket() {
     (async () => {
       try {
         const { mint, pinnedPool } = await resolveInput(text);
-        const [asset, candidates] = await Promise.all([getUnderlying(mint.toBase58()), raydiumPools(mint)]);
+        const [asset, candidates] = await Promise.all([getUnderlying(mint.toBase58()), discoverPools(conn, mint)]);
         if (!alive) return;
-        if (!candidates.length) throw new Error("No Raydium CLMM pool against SOL/USDC/USDT for this token — it needs one to have an oracle.");
-        const infos = await conn.getMultipleAccountsInfo(candidates.map((c) => c.id));
-        const obsKeys = infos.map((i) => (i ? new PublicKey(i.data.subarray(201, 233)) : null));
-        const obsInfos = await conn.getMultipleAccountsInfo(obsKeys.filter((k): k is PublicKey => !!k));
-        let oi = 0;
-        const rows: PoolRow[] = candidates.map((c, i) => {
-          const obs = obsKeys[i];
-          const od = obs ? obsInfos[oi++] : null;
-          return { ...c, obs: obs ?? c.id, health: od ? oracleHealth(od.data) : null };
-        });
-        // prefer SOL quote, then usable oracle, then depth
-        rows.sort((a, b) => Number(b.quote === "SOL") - Number(a.quote === "SOL") || Number(!!b.health?.ok) - Number(!!a.health?.ok) || b.tvl - a.tvl);
+        if (!candidates.length) throw new Error("No pool against SOL/USDC/USDT for this token on Raydium (CLMM/CPMM), PumpSwap or Meteora (DAMM v2/DLMM) — it needs one to have an oracle.");
+        const wanted = pinnedPool ?? (q.get("pool") ? new PublicKey(q.get("pool")!) : null);
+        const all: PoolRow[] = candidates.map((c) => ({ ...c, health: c.obsData ? oracleHealth(c.obsData) : null }));
+        // a usable oracle first, then where the volume is (hardest pool to push around), then depth (USD; PumpSwap has no
+        // API figure, so twice its SOL reserve)
+        const depth = (p: PoolRow) => candidateTvlUsd(p, solUsd) ?? 0;
+        const vol = (p: PoolRow) => p.volume24h ?? 0;
+        all.sort((a, b) => Number(usable(b)) - Number(usable(a)) || vol(b) - vol(a) || depth(b) - depth(a));
+        // five venues can mean dozens of dust pools: keep the ones with real liquidity (and whatever was pinned), a dozen at most
+        const live = all.filter((p) => depth(p) >= 10 || (wanted && p.pool.equals(wanted)));
+        const rows = (live.length ? live : all).slice(0, 12);
         if (!alive) return;
         setUnder(asset ?? { mint: mint.toBase58(), name: short(mint.toBase58()), symbol: "TOKEN", image: null, decimals: 0 });
         setPools(rows);
-        const wanted = pinnedPool ?? (q.get("pool") ? new PublicKey(q.get("pool")!) : null);
-        const pinned = wanted ? rows.findIndex((r) => r.id.equals(wanted)) : -1;
+        const pinned = wanted ? rows.findIndex((r) => r.pool.equals(wanted)) : -1;
         setPoolIdx(pinned >= 0 ? pinned : 0);
-        q.set({ mint: mint.toBase58(), pool: rows[pinned >= 0 ? pinned : 0]?.id.toBase58() ?? null });
+        q.set({ mint: mint.toBase58(), pool: rows[pinned >= 0 ? pinned : 0]?.pool.toBase58() ?? null });
       } catch (e) {
         if (alive) setInputErr(e instanceof Error ? e.message : String(e));
       } finally {
@@ -197,26 +164,29 @@ export default function NewMarket() {
     let alive = true;
     const m = underlyingMint.toBase58();
     Promise.all([getDerivedMeta(m, "up"), getDerivedMeta(m, "down")]).then(([up, down]) => alive && setMeta({ up, down })).catch(() => {});
-    marketsForOracle(pool.obs).then((ms) => alive && setExisting(ms)).catch(() => {});
+    marketsForOracle(pool.slotObs).then((ms) => alive && setExisting(ms)).catch(() => {});
     return () => {
       alive = false;
     };
-  }, [underlyingMint?.toBase58(), pool?.obs.toBase58()]);
+  }, [underlyingMint?.toBase58(), pool?.slotObs.toBase58()]);
 
   const flag = pool && underlyingMint ? (pool.mint0.equals(underlyingMint) ? 1 : 0) : 0;
   const windowOk = windowSecs >= 60 && windowSecs <= 86_400;
-  const kp = useMemo(() => (pool ? loadOrMakeKeys(`${pool.obs.toBase58()}:${windowSecs}`) : null), [pool?.obs.toBase58(), windowSecs]);
+  // the market PDA (and the resume key) commit to the oracle_obs slot: the CLMM ring, the PumpSwap base ATA, the CPMM token-0 vault, the Meteora pool
+  const kp = useMemo(() => (pool ? loadOrMakeKeys(`${pool.slotObs.toBase58()}:${windowSecs}`) : null), [pool?.slotObs.toBase58(), windowSecs]);
   const keys: MarketKeys | null = useMemo(() => {
     if (!pool || !kp || !windowOk) return null;
     return {
-      key: marketPda(kp.bull.publicKey, kp.bear.publicKey, pool.obs, windowSecs, flag),
+      key: marketPda(kp.bull.publicKey, kp.bear.publicKey, pool.slotObs, windowSecs, flag),
       bullMint: kp.bull.publicKey,
       bearMint: kp.bear.publicKey,
-      oraclePool: pool.id,
-      oracleObs: pool.obs,
+      oraclePool: pool.slotPool,
+      oracleObs: pool.slotObs,
       windowSecs,
       underlyingIsToken0: flag,
       config: kp.config.publicKey,
+      oracleKind: pool.kind,
+      venuePool: pool.kind === 1 || pool.kind === 2 ? pool.pool : undefined,
     };
   }, [pool, kp, windowSecs, windowOk, flag]);
 
@@ -282,7 +252,7 @@ export default function NewMarket() {
         }
       }
       try {
-        localStorage.removeItem(keyStore(`${pool.obs.toBase58()}:${windowSecs}`));
+        localStorage.removeItem(keyStore(`${pool.slotObs.toBase58()}:${windowSecs}`));
       } catch {
         /* ignore */
       }
@@ -299,9 +269,19 @@ export default function NewMarket() {
   }
 
   const resumed = steps.some((s) => s === "done") || !!kp?.resumed;
-  const canCreate = !!publicKey && !!keys && !!meta && !busy && !!pool?.health?.ok;
+  const canCreate = !!publicKey && !!keys && !!meta && !busy && !!pool && usable(pool);
   const symbol = under?.symbol ?? "…";
   const stepLabel = (s: StepState) => (s === "idle" ? "pending" : s);
+  const poolTvl = (p: PoolRow) => candidateTvlUsd(p, solUsd);
+  const poolMove = (p: PoolRow) => candidateMove1PctUsd(p, solUsd);
+  /** One-line oracle note per row: ring health for CLMM, manipulation cost (depth) for AMMs. */
+  const healthNote = (p: PoolRow) => {
+    if (p.venue === "clmm") return p.health ? `${p.health.observations} obs · ${ago(Math.floor(Date.now() / 1000) - p.health.lastAgeSecs)}` : "no observations";
+    const m = poolMove(p);
+    if (m !== null) return `~${usdRound(m)} to move 1%`;
+    // SOL quote before /api/price answered: say it in SOL
+    return p.quoteReserve === null ? "no reserves" : `~${((Number(p.quoteReserve) * MOVE_1PCT) / 10 ** p.quoteDecimals).toFixed(2)} ${p.quote} to move 1%`;
+  };
   return (
     <>
       <header className="mkt-head">
@@ -337,7 +317,7 @@ export default function NewMarket() {
             <div className="step-n">1</div>
             <div className="field">
               <label htmlFor="ca">
-                <span className="meta">Coin · CA or CLMM pool</span>
+                <span className="meta">Coin · CA or pool</span>
                 {resolving && <span className="meta">looking up…</span>}
               </label>
               <div className="input text" data-invalid={!!inputErr}>
@@ -359,13 +339,14 @@ export default function NewMarket() {
                   <span className="addr">{short(under.mint)}</span>
                 </div>
               )}
+              <RunnerPicks current={under?.mint ?? input.trim()} onPick={setInput} />
             </div>
           </section>
 
           <section className="step" aria-disabled={!pools.length}>
             <div className="step-n">2</div>
             <div className="field">
-              <span className="meta">Oracle · Raydium pool</span>
+              <span className="meta">Oracle · pool</span>
               {!pools.length ? (
                 <p className="note">{under ? "No usable pool." : "Resolves after the coin."}</p>
               ) : (
@@ -373,26 +354,27 @@ export default function NewMarket() {
                   {pools.map((p, i) => (
                     <button
                       type="button"
-                      key={p.id.toBase58()}
+                      key={p.pool.toBase58()}
                       role="radio"
                       aria-checked={i === poolIdx}
-                      className="pool"
+                      className="pool venue-row"
                       onClick={() => {
                         setPoolIdx(i);
-                        q.set({ pool: p.id.toBase58() });
+                        q.set({ pool: p.pool.toBase58() });
                       }}
-                      disabled={!p.health?.ok}
-                      title={p.health?.ok ? undefined : "Too few observations to be an oracle"}
+                      disabled={!usable(p)}
+                      title={usable(p) ? VENUE_LABEL[p.venue] : p.venue === "clmm" ? "Too few observations to be an oracle" : "Pool holds no reserves"}
                     >
                       <span className="pool-pair">
+                        <span className="venue-badge" data-venue={p.venue}>
+                          {VENUE_LABEL[p.venue]}
+                        </span>
                         {under?.symbol}/{p.quote}
-                        <span className="addr"> {short(p.id.toBase58())}</span>
+                        <span className="addr"> {short(p.pool.toBase58())}</span>
                       </span>
-                      <span className="num">${p.tvl.toLocaleString("en-US", { maximumFractionDigits: 0 })} TVL</span>
-                      <span className="num">${p.volume24h.toLocaleString("en-US", { maximumFractionDigits: 0 })} / 24h</span>
-                      <span className={`num ${p.health?.ok ? "" : "down"}`}>
-                        {p.health ? `${p.health.observations} obs · ${ago(Math.floor(Date.now() / 1000) - p.health.lastAgeSecs)}` : "no observations"}
-                      </span>
+                      <span className="num">{usdRound(poolTvl(p))} TVL</span>
+                      <span className="num">{p.volume24h === null ? "— / 24h" : `${usdRound(p.volume24h)} / 24h`}</span>
+                      <span className={`num ${usable(p) ? "" : "down"}`}>{healthNote(p)}</span>
                     </button>
                   ))}
                 </div>
@@ -492,6 +474,7 @@ export default function NewMarket() {
               <p>Names, symbols, images: pulled from the token's own metadata.</p>
               <p>Market address commits to the mints, oracle and window.</p>
               <p>Window: shorter tracks faster but one fat trade can lean on it; longer is calmer. Only stored observations count — no same-block flashloans.</p>
+              <p>Oracle venues: Raydium CLMM (its observation ring), or PumpSwap, Raydium CPMM, Meteora DAMM v2 / DLMM (the market samples the pool itself every settle; a one-slot push is worth elapsed ÷ window).</p>
               <p>Keys stay in this browser until the market exists. Close the tab mid-listing; it resumes.</p>
               <p>Same oracle, different window: allowed. Same window: duplicate.</p>
             </div>
@@ -537,24 +520,48 @@ export default function NewMarket() {
             <section className="panel">
               <h2 className="meta">Oracle</h2>
               <div className="panel-row">
-                <span className="muted">Pool</span>
+                <span className="muted">Venue</span>
                 <span className="num">
-                  {under?.symbol}/{pool.quote} · {short(pool.id.toBase58())}
+                  <span className="venue-badge" data-venue={pool.venue}>
+                    {VENUE_LABEL[pool.venue]}
+                  </span>
                 </span>
               </div>
               <div className="panel-row">
-                <span className="muted">Observations</span>
-                <span className="num">{pool.health?.observations ?? 0} / 100</span>
+                <span className="muted">Pool</span>
+                <span className="num">
+                  {under?.symbol}/{pool.quote} · {short(pool.pool.toBase58())}
+                </span>
               </div>
-              <div className="panel-row">
-                <span className="muted">Ring span</span>
-                <span className="num">{pool.health ? `${(pool.health.spanSecs / 60).toFixed(0)} min` : "—"}</span>
-              </div>
-              <div className="panel-row">
-                <span className="muted">Last obs</span>
-                <span className="num">{pool.health && Number.isFinite(pool.health.lastAgeSecs) ? ago(Math.floor(Date.now() / 1000) - pool.health.lastAgeSecs) : "—"}</span>
-              </div>
-              {pool.health && pool.health.spanSecs < windowSecs && <p className="note">Ring shorter than window · fills in over time.</p>}
+              {pool.venue === "clmm" ? (
+                <>
+                  <div className="panel-row">
+                    <span className="muted">Observations</span>
+                    <span className="num">{pool.health?.observations ?? 0} / 100</span>
+                  </div>
+                  <div className="panel-row">
+                    <span className="muted">Ring span</span>
+                    <span className="num">{pool.health ? `${(pool.health.spanSecs / 60).toFixed(0)} min` : "—"}</span>
+                  </div>
+                  <div className="panel-row">
+                    <span className="muted">Last obs</span>
+                    <span className="num">{pool.health && Number.isFinite(pool.health.lastAgeSecs) ? ago(Math.floor(Date.now() / 1000) - pool.health.lastAgeSecs) : "—"}</span>
+                  </div>
+                  {pool.health && pool.health.spanSecs < windowSecs && <p className="note">Ring shorter than window · fills in over time.</p>}
+                </>
+              ) : (
+                <>
+                  <div className="panel-row">
+                    <span className="muted">{pool.quote} in pool</span>
+                    <span className="num">{pool.quoteReserve === null ? "—" : `${(Number(pool.quoteReserve) / 10 ** pool.quoteDecimals).toLocaleString("en-US", { maximumFractionDigits: 2 })} ${pool.quote}`}</span>
+                  </div>
+                  <div className="panel-row">
+                    <span className="muted">To move 1%</span>
+                    <span className="num">{healthNote(pool).replace(/ to move 1%$/, "")}</span>
+                  </div>
+                  <p className="note">No observation ring: the market samples this pool on every settle and averages its own checkpoints over the window. Depth is the manipulation cost.</p>
+                </>
+              )}
             </section>
           )}
         </aside>
