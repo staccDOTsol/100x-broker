@@ -4058,3 +4058,5 @@ details.math summary { cursor: pointer; color: var(--ink-3); }
   .runner { animation: none; transition: none; }
   .runner:hover { transform: none; }
 }
+.runners-cta { color: var(--signal-ink); text-decoration: none; border-bottom: 1px dotted currentColor; }
+.runners-cta:hover { color: var(--ink); }
