@@ -1,0 +1,15 @@
+import fs from "fs";
+import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { cu, pokeIx, type Market } from "./lib";
+import { send } from "./dn/ops";
+const conn = new Connection(process.env.RPC!, "confirmed");
+const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(process.env.PAYER!, "utf8"))));
+const MARKET = new PublicKey("9LAcY3v4EBG8dkKtHvh7ynJGzvGFp5cTQqzGuowaSgCG");
+const read = async () => { const d = (await conn.getAccountInfo(MARKET))!.data; return { twapTick: Number(d.readBigInt64LE(424) >> 32n), lastSample: Math.floor(Date.now() / 1000) - d.readUInt32LE(484) }; };
+const md = (await conn.getAccountInfo(MARKET))!.data;
+const pk = (o: number) => new PublicKey(md.subarray(o, o + 32));
+const opool = (await conn.getAccountInfo(pk(232)))!;
+const m: Market = { key: MARKET, bullMint: pk(8), bearMint: pk(40), oraclePool: pk(104), oracleObs: pk(136), windowSecs: md.readUInt32LE(480), underlyingIsToken0: md[489], config: new PublicKey(opool.data.subarray(72, 104)) };
+console.log("before", await read());
+const r = await send(conn, payer, [pokeIx(m)], [], [], "poke SI"); void cu;
+console.log("poked", r.sig.slice(0, 12), "after", await read());

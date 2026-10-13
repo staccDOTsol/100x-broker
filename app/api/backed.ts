@@ -1,0 +1,65 @@
+// /api/backed -> how much 100x.broker exits have committed to the STACCIndex raise under the 0/20 rule: every `fund` on the
+// launch that rode in the same transaction as one of our program's instructions. Amounts are USDC (6 dp). Cached a minute.
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { Connection, PublicKey, type ParsedTransactionWithMeta, type PartiallyDecodedInstruction } from "@solana/web3.js";
+import bs58 from "bs58";
+
+const LAUNCH = new PublicKey("6wot8WTk5WGoUQrSbFaTzMasUutYBfQDG3pNan3LG9sU");
+const LAUNCH_PROGRAM = "moontUzsdepotRGe5xsfip7vLPTJnVuafqdUWexVnPM";
+const OURS = process.env.VITE_PROGRAM_ID ?? "T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb";
+const MEMO = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
+const MEMO_TAG = "100x.broker 0/20";
+const JUP = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
+const FUND_DISC = Buffer.from([218, 188, 111, 221, 152, 113, 174, 7]);
+const SINCE = Date.parse("2026-10-11T20:00:00Z") / 1000;
+
+function fundAmount(tx: ParsedTransactionWithMeta): bigint | null {
+  const ixs = tx.transaction.message.instructions as (PartiallyDecodedInstruction | { programId: PublicKey })[];
+  const progs = new Set(ixs.map((i) => i.programId.toBase58()));
+  // ours if: a 100x instruction rides along (exits), or our memo tag (every 0/20 tx from now on), or a Jupiter swap feeding the
+  // fund in one tx (the standalone unvault leg before the tag existed — Backable's own UI never swaps-and-funds in one go)
+  const memo = ixs.some((i) => i.programId.toBase58() === MEMO && "parsed" in i && String((i as any).parsed ?? "").includes(MEMO_TAG));
+  if (!progs.has(OURS) && !memo && !progs.has(JUP)) return null;
+  for (const i of ixs) {
+    if (i.programId.toBase58() !== LAUNCH_PROGRAM || !("data" in i)) continue;
+    const d = Buffer.from(bs58.decode(i.data));
+    if (d.length >= 16 && d.subarray(0, 8).equals(FUND_DISC)) return d.readBigUInt64LE(8);
+  }
+  return null;
+}
+
+export default async function handler(_req: VercelRequest, res: VercelResponse) {
+  try {
+    const u = process.env.HELIUS_RPC_URL;
+    if (!u) throw new Error("HELIUS_RPC_URL not configured");
+    const c = new Connection(u, "confirmed");
+    const sigs: string[] = [];
+    let before: string | undefined;
+    for (;;) {
+      const page = await c.getSignaturesForAddress(LAUNCH, { limit: 1000, before });
+      let crossed = false;
+      for (const s of page) {
+        if ((s.blockTime ?? 0) < SINCE) { crossed = true; break; }
+        if (!s.err) sigs.push(s.signature);
+      }
+      if (crossed || page.length < 1000) break;
+      before = page[page.length - 1].signature;
+    }
+    let usdc = 0n, txs = 0;
+    const backers = new Set<string>();
+    for (let i = 0; i < sigs.length; i += 40) {
+      const batch = await c.getParsedTransactions(sigs.slice(i, i + 40), { maxSupportedTransactionVersion: 0 });
+      for (const tx of batch) {
+        if (!tx || tx.meta?.err) continue;
+        const a = fundAmount(tx);
+        if (a === null) continue;
+        usdc += a; txs++;
+        backers.add(tx.transaction.message.accountKeys[0].pubkey.toBase58());
+      }
+    }
+    res.setHeader("cache-control", "public, max-age=5, s-maxage=10, stale-while-revalidate=30")
+      .json({ usd: Number(usdc) / 1e6, txs, backers: backers.size, at: Date.now() });
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : "backed failed" });
+  }
+}

@@ -1,0 +1,375 @@
+// Activity + leaderboards straight from chain: parse every transaction that touched a market.
+import { Connection, PublicKey, type ParsedInstruction, type ParsedTransactionWithMeta, type PartiallyDecodedInstruction } from "@solana/web3.js";
+import bs58 from "bs58";
+import { getAsset } from "./das.js";
+import { readMarketCard } from "./og.js";
+
+const PROGRAM_ID = new PublicKey(process.env.VITE_PROGRAM_ID ?? "T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb");
+const DBC = "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN";
+const RFSTACC = "pSYRpDqr847kB2nD5ZhjcPsHLV2ZpUxweXm1MwiSTcc";
+const MARKET_LEN = 1008;
+const SWAP_DISC = Buffer.from([183, 93, 153, 40, 24, 230, 194, 151]);
+const CLAIM_DISC = Buffer.from([84, 191, 71, 50, 9, 162, 55, 193]);
+
+const conn = () => {
+  const u = process.env.HELIUS_RPC_URL;
+  if (!u) throw new Error("HELIUS_RPC_URL not configured");
+  return new Connection(u, "confirmed");
+};
+const pk = (d: Buffer, o: number) => new PublicKey(d.subarray(o, o + 32)).toBase58();
+
+export type Ctx = {
+  key: string;
+  ticker: string;
+  mints: [string, string];
+  decimals: [number, number];
+  vaults: [string, string];
+  baseVaults: [string, string];
+  quoteVaults: [string, string];
+  escrows: [string, string];
+};
+const ctxCache = new Map<string, { at: number; v: Ctx }>();
+export async function marketCtx(key: PublicKey): Promise<Ctx> {
+  const hit = ctxCache.get(key.toBase58());
+  if (hit && Date.now() - hit.at < 300_000) return hit.v;
+  const c = conn();
+  const d = (await c.getAccountInfo(key))!.data;
+  if (d.length !== MARKET_LEN) throw new Error("not a market");
+  const [pB, pR, mB, mR, opool] = await c.getMultipleAccountsInfo([new PublicKey(pk(d, 232)), new PublicKey(pk(d, 264)), new PublicKey(pk(d, 8)), new PublicKey(pk(d, 40)), new PublicKey(pk(d, 104))]);
+  const underlying = pk(opool!.data, d[489] ? 73 : 105);
+  const asset = await getAsset(underlying).catch(() => null);
+  const v: Ctx = {
+    key: key.toBase58(),
+    ticker: asset?.symbol ?? underlying.slice(0, 4),
+    mints: [pk(d, 8), pk(d, 40)],
+    decimals: [mB!.data[44], mR!.data[44]],
+    vaults: [pk(d, 168), pk(d, 200)],
+    baseVaults: [pk(d, 296), pk(d, 328)],
+    quoteVaults: [pk(pB!.data, 200), pk(pR!.data, 200)],
+    escrows: [pk(d, 360), pk(d, 392)],
+  };
+  ctxCache.set(key.toBase58(), { at: Date.now(), v });
+  return v;
+}
+
+export type Ev = {
+  sig: string;
+  ts: number;
+  kind: "buy" | "sell" | "redeem" | "settle" | "claim" | "rebalance" | "listed" | "burn";
+  market: string;
+  ticker: string;
+  actor: string;
+  side?: 0 | 1;
+  tokens?: number; // ui amount of UP/DOWN
+  quote?: string; // r-fstacc raw (lamports) moved to/from the actor or vault
+  paid?: { from: 0 | 1; to: 0 | 1; amount: string }; // vault -> vault rebalance in this tx
+  owed?: number; // settle: fraction of price taken
+};
+
+type Flow = { mint?: string; source: string; destination: string; amount: bigint };
+function flows(tx: ParsedTransactionWithMeta): { transfers: Flow[]; burns: { mint: string; amount: bigint }[]; mints: { mint: string; amount: bigint }[] } {
+  const transfers: Flow[] = [];
+  const burns: { mint: string; amount: bigint }[] = [];
+  const mints: { mint: string; amount: bigint }[] = [];
+  const all: (ParsedInstruction | PartiallyDecodedInstruction)[] = [
+    ...tx.transaction.message.instructions,
+    ...(tx.meta?.innerInstructions ?? []).flatMap((i) => i.instructions),
+  ];
+  for (const ix of all) {
+    if (!("parsed" in ix) || typeof ix.parsed !== "object") continue;
+    const { type, info } = ix.parsed as { type: string; info: any };
+    const amt = BigInt(info?.tokenAmount?.amount ?? info?.amount ?? 0);
+    if (type === "transfer" || type === "transferChecked") transfers.push({ mint: info.mint, source: info.source, destination: info.destination, amount: amt });
+    else if (type === "burn" || type === "burnChecked") burns.push({ mint: info.mint, amount: amt });
+    else if (type === "mintTo" || type === "mintToChecked") mints.push({ mint: info.mint, amount: amt });
+  }
+  return { transfers, burns, mints };
+}
+
+function topLevel(tx: ParsedTransactionWithMeta, program: string) {
+  return tx.transaction.message.instructions.filter((ix): ix is PartiallyDecodedInstruction => !("parsed" in ix) && ix.programId.toBase58() === program);
+}
+
+export function classify(tx: ParsedTransactionWithMeta, ctx: Ctx): Ev | null {
+  if (!tx.meta || tx.meta.err) return null;
+  const sig = tx.transaction.signatures[0];
+  const ts = tx.blockTime ?? 0;
+  const actor = tx.transaction.message.accountKeys[0].pubkey.toBase58();
+  const base = { sig, ts, market: ctx.key, ticker: ctx.ticker, actor };
+  const { transfers, burns, mints } = flows(tx);
+  const sideOfMint = (m?: string): 0 | 1 | -1 => (m === ctx.mints[0] ? 0 : m === ctx.mints[1] ? 1 : -1);
+  const ui = (raw: bigint, side: 0 | 1) => Number(raw) / 10 ** ctx.decimals[side];
+
+  // vault -> vault rebalance (the hook), present in most txs
+  let paid: Ev["paid"];
+  for (const t of transfers) {
+    const f = ctx.vaults.indexOf(t.source);
+    const to = ctx.vaults.indexOf(t.destination);
+    if (f >= 0 && to >= 0 && f !== to && t.amount > 0n) paid = { from: f as 0 | 1, to: to as 0 | 1, amount: t.amount.toString() };
+  }
+
+  const ours = topLevel(tx, PROGRAM_ID.toBase58()).map((ix) => bs58.decode(ix.data)[0]);
+  const dbc = topLevel(tx, DBC).map((ix) => Buffer.from(bs58.decode(ix.data).subarray(0, 8)));
+
+  if (ours.includes(0)) return { ...base, kind: "listed" };
+  if (ours.includes(3)) {
+    const m = mints.find((x) => sideOfMint(x.mint) >= 0);
+    const side = m ? (sideOfMint(m.mint) as 0 | 1) : 0;
+    const proceeds = transfers.filter((t) => t.destination === ctx.vaults[1 - side] && t.source === ctx.quoteVaults[side]).reduce((a, t) => a + t.amount, 0n);
+    return { ...base, kind: "settle", side, tokens: m ? ui(m.amount, side) : undefined, quote: proceeds.toString(), paid };
+  }
+  if (ours.includes(2)) {
+    const b = burns.find((x) => sideOfMint(x.mint) >= 0);
+    if (b) {
+      const side = sideOfMint(b.mint) as 0 | 1;
+      const out = transfers.filter((t) => t.source === ctx.vaults[side] && !ctx.vaults.includes(t.destination)).reduce((a, t) => a + t.amount, 0n);
+      return { ...base, kind: "redeem", side, tokens: ui(b.amount, side), quote: out.toString(), paid };
+    }
+  }
+  if (dbc.some((d) => d.equals(SWAP_DISC))) {
+    for (const t of transfers) {
+      const sd = sideOfMint(t.mint);
+      if (sd < 0) continue;
+      const side = sd as 0 | 1;
+      if (t.source === ctx.baseVaults[side]) {
+        const q = transfers.filter((x) => x.destination === ctx.quoteVaults[side] && x.mint === RFSTACC).reduce((a, x) => a + x.amount, 0n);
+        return { ...base, kind: "buy", side, tokens: ui(t.amount, side), quote: q.toString(), paid };
+      }
+      if (t.destination === ctx.baseVaults[side]) {
+        const q = transfers.filter((x) => x.source === ctx.quoteVaults[side] && x.mint === RFSTACC).reduce((a, x) => a + x.amount, 0n);
+        return { ...base, kind: "sell", side, tokens: ui(t.amount, side), quote: q.toString(), paid };
+      }
+    }
+  }
+  if (dbc.some((d) => d.equals(CLAIM_DISC))) {
+    const q = transfers.filter((t) => ctx.quoteVaults.includes(t.source) && ctx.vaults.includes(t.destination)).reduce((a, t) => a + t.amount, 0n);
+    return { ...base, kind: "claim", quote: q.toString(), paid };
+  }
+  if (paid) return { ...base, kind: "rebalance", paid };
+  return null;
+}
+
+export async function marketFeed(key: PublicKey, limit = 40): Promise<Ev[]> {
+  const c = conn();
+  const [ctx, sigs] = await Promise.all([marketCtx(key), c.getSignaturesForAddress(key, { limit })]);
+  const ok = sigs.filter((s) => !s.err).map((s) => s.signature);
+  const txs = await c.getParsedTransactions(ok, { maxSupportedTransactionVersion: 0 });
+  return txs.map((t) => (t ? classify(t, ctx) : null)).filter((e): e is Ev => !!e);
+}
+
+export async function allMarkets(): Promise<PublicKey[]> {
+  const res = await conn().getProgramAccounts(PROGRAM_ID, { dataSlice: { offset: 0, length: 0 }, filters: [{ dataSize: MARKET_LEN }] });
+  return res.map((r) => r.pubkey);
+}
+
+// ---------- plumbing, not people ----------
+const DN_PROGRAM = new PublicKey("2ZbjE44nSh3AmpREg4sdNMViBLAzAEtFKYDn1XdqMzEj");
+/** Signs every vault rebalance, so it would top any activity list on its own. */
+const KEEPER = process.env.DN_KEEPER ?? "EGa3ng1xcuB5X9tkK7czYczhD4PpAYAJF52Vo9F2Cn7";
+let botCache: { at: number; v: Set<string> } | null = null;
+/** The keeper plus every dnvault PDA and its SOL sub-account: they hold DOWN and trade it, but they are not wallets. 5 min cache. */
+export async function botAddresses(): Promise<Set<string>> {
+  if (botCache && Date.now() - botCache.at < 300_000) return botCache.v;
+  const v = new Set([KEEPER]);
+  try {
+    // "dnvault1" in base58, the same filter the client's listVaults uses
+    const res = await conn().getProgramAccounts(DN_PROGRAM, { filters: [{ memcmp: { offset: 0, bytes: "HoK4CZtz9b6" } }] });
+    for (const a of res) {
+      v.add(a.pubkey.toBase58());
+      v.add(pk(a.account.data, 392)); // solPda
+    }
+    botCache = { at: Date.now(), v };
+    return v;
+  } catch {
+    return botCache?.v ?? v; // a flaky RPC should not let the vaults back onto the board
+  }
+}
+
+const MEME = process.env.VITE_MEME_MINT ?? "Fr28jEWz2msSCKLaHzus2nCKrwqbpTx2EyDYtsVVpump";
+const BURN_STATE = PublicKey.findProgramAddressSync([Buffer.from("burn-state")], PROGRAM_ID)[0];
+const BURN_VAULT = PublicKey.findProgramAddressSync([Buffer.from("burn")], PROGRAM_ID)[0].toBase58();
+
+function burnEv(tx: ParsedTransactionWithMeta): Ev | null {
+  if (!tx.meta || tx.meta.err) return null;
+  const { transfers, burns } = flows(tx);
+  const b = burns.find((x) => x.mint === MEME);
+  if (!b) return null;
+  const paid = transfers.filter((t) => t.source === BURN_VAULT).reduce((a, t) => a + t.amount, 0n);
+  return { sig: tx.transaction.signatures[0], ts: tx.blockTime ?? 0, kind: "burn", market: BURN_STATE.toBase58(), ticker: "100XBRO", actor: tx.transaction.message.accountKeys[0].pubkey.toBase58(), tokens: Number(b.amount) / 1e6, quote: paid.toString() };
+}
+
+/** $100X burns: every one touches the burn-state PDA. */
+export async function burnFeed(limit = 20): Promise<Ev[]> {
+  const c = conn();
+  const sigs = await c.getSignaturesForAddress(BURN_STATE, { limit });
+  const txs = await c.getParsedTransactions(sigs.filter((s) => !s.err).map((s) => s.signature), { maxSupportedTransactionVersion: 0 });
+  return txs.map((t) => (t ? burnEv(t) : null)).filter((e): e is Ev => !!e);
+}
+
+export async function globalFeed(perMarket = 15): Promise<Ev[]> {
+  const markets = await allMarkets();
+  const feeds = await Promise.all([...markets.map((m) => marketFeed(m, perMarket).catch(() => [] as Ev[])), burnFeed(20).catch(() => [] as Ev[])]);
+  return feeds.flat().sort((a, b) => b.ts - a.ts).slice(0, 60);
+}
+
+const T22 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+const TOK = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const ATA_PROG = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
+const ataOf = (mint: PublicKey, owner: PublicKey, program = T22) =>
+  PublicKey.findProgramAddressSync([owner.toBuffer(), program.toBuffer(), mint.toBuffer()], ATA_PROG)[0];
+
+/** One wallet's moves. Its UP/DOWN token accounts are the index (every buy/sell/redeem touches one), its $100X account for burns. */
+export async function walletFeed(owner: PublicKey, perAccount = 40): Promise<Ev[]> {
+  const c = conn();
+  const ctxs = await Promise.all((await allMarkets()).map((m) => marketCtx(m).catch(() => null)));
+  const jobs: { ata: PublicKey; ctx: Ctx | null }[] = [{ ata: ataOf(new PublicKey(MEME), owner, TOK), ctx: null }];
+  for (const ctx of ctxs) if (ctx) for (const m of ctx.mints) jobs.push({ ata: ataOf(new PublicKey(m), owner), ctx });
+  const lists = await Promise.all(jobs.map((j) => c.getSignaturesForAddress(j.ata, { limit: perAccount }).catch(() => [])));
+  const ctxOf = new Map<string, Ctx | null>();
+  lists.forEach((l, i) => l.forEach((s) => !s.err && !ctxOf.has(s.signature) && ctxOf.set(s.signature, jobs[i].ctx)));
+  const sigs = [...ctxOf.keys()];
+  const txs: (ParsedTransactionWithMeta | null)[] = [];
+  for (let i = 0; i < sigs.length; i += 100) txs.push(...(await c.getParsedTransactions(sigs.slice(i, i + 100), { maxSupportedTransactionVersion: 0 })));
+  const me = owner.toBase58();
+  const out: Ev[] = [];
+  txs.forEach((tx, i) => {
+    if (!tx) return;
+    const ctx = ctxOf.get(sigs[i]);
+    const ev = ctx ? classify(tx, ctx) : burnEv(tx);
+    if (ev && ev.actor === me) out.push(ev);
+  });
+  return out.sort((a, b) => b.ts - a.ts).slice(0, 60);
+}
+
+// ---------- leaderboards ----------
+export type Holder = { owner: string; tokens: number; valueUsd: number | null; redeemUsd: number | null; share: number };
+export type Board = { market: string; ticker: string; sides: [Holder[], Holder[]]; leverage: [number, number] };
+
+export async function marketLeaders(key: PublicKey): Promise<Board> {
+  const c = conn();
+  const [ctx, card] = await Promise.all([marketCtx(key), readMarketCard(key, false)]);
+  const sides = await Promise.all(
+    ([0, 1] as const).map(async (side) => {
+      const largest = await c.getTokenLargestAccounts(new PublicKey(ctx.mints[side]));
+      const accts = largest.value.filter((a) => a.address.toBase58() !== ctx.baseVaults[side] && a.address.toBase58() !== ctx.escrows[side] && BigInt(a.amount) > 0n);
+      const infos = await c.getMultipleAccountsInfo(accts.map((a) => a.address));
+      const s = card.sides[side];
+      const circ = Number(s.circulating) / 10 ** s.decimals || 1;
+      return accts
+        .map((a, i) => {
+          const owner = infos[i] ? pk(infos[i]!.data, 32) : a.address.toBase58();
+          const tokens = Number(a.amount) / 10 ** s.decimals;
+          return {
+            owner,
+            tokens,
+            valueUsd: s.priceUsd === null ? null : tokens * s.priceUsd,
+            redeemUsd: s.navUsd === null ? null : tokens * s.navUsd * 0.96,
+            share: tokens / circ,
+          };
+        })
+        .sort((x, y) => y.tokens - x.tokens)
+        .slice(0, 10);
+    }),
+  );
+  return { market: ctx.key, ticker: ctx.ticker, sides: sides as [Holder[], Holder[]], leverage: [card.sides[0].leverage, card.sides[1].leverage] };
+}
+
+export type Wallet = { owner: string; valueUsd: number; positions: number; biggest: { ticker: string; side: 0 | 1; valueUsd: number } | null };
+export async function globalLeaders(): Promise<Wallet[]> {
+  const [markets, bots] = await Promise.all([allMarkets(), botAddresses()]);
+  const boards = await Promise.all(markets.map((m) => marketLeaders(m).catch(() => null)));
+  const agg = new Map<string, Wallet>();
+  for (const b of boards) {
+    if (!b) continue;
+    for (const side of [0, 1] as const) {
+      for (const h of b.sides[side]) {
+        if (bots.has(h.owner)) continue; // the vaults' hedge bags are not anyone's bags
+        const w = agg.get(h.owner) ?? { owner: h.owner, valueUsd: 0, positions: 0, biggest: null };
+        w.valueUsd += h.valueUsd ?? 0;
+        w.positions += 1;
+        if (!w.biggest || (h.valueUsd ?? 0) > w.biggest.valueUsd) w.biggest = { ticker: b.ticker, side, valueUsd: h.valueUsd ?? 0 };
+        agg.set(h.owner, w);
+      }
+    }
+  }
+  return [...agg.values()].sort((a, b) => b.valueUsd - a.valueUsd).slice(0, 20);
+}
+
+/** Every event on one market since `since` (unix s): signatures newest-first, paged until we cross the cutoff. `drop` skips whole txs. */
+async function marketEventsSince(key: PublicKey, since: number, drop?: (tx: ParsedTransactionWithMeta) => boolean, maxSigs = 3000): Promise<Ev[]> {
+  const c = conn();
+  const ctx = await marketCtx(key);
+  const sigs: string[] = [];
+  let before: string | undefined;
+  while (sigs.length < maxSigs) {
+    const page = await c.getSignaturesForAddress(key, { limit: 1000, before });
+    let crossed = false;
+    for (const s of page) {
+      if ((s.blockTime ?? 0) < since) {
+        crossed = true;
+        break;
+      }
+      if (!s.err) sigs.push(s.signature);
+    }
+    if (crossed || page.length < 1000) break;
+    before = page[page.length - 1].signature;
+  }
+  const txs: (ParsedTransactionWithMeta | null)[] = [];
+  for (let i = 0; i < sigs.length; i += 100) txs.push(...(await c.getParsedTransactions(sigs.slice(i, i + 100), { maxSupportedTransactionVersion: 0 })));
+  return txs.map((t) => (t && !drop?.(t) ? classify(t, ctx) : null)).filter((e): e is Ev => !!e);
+}
+
+export type Active = {
+  owner: string;
+  in: string; // r-fstacc raw bought
+  out: string; // r-fstacc raw sold + cashed out
+  net: string; // out − in
+  trades: number;
+  markets: number;
+  last: number;
+  top: { market: string; ticker: string; side: 0 | 1; quote: string } | null;
+};
+
+/** Who actually traded in the window, closed positions included — the bags board only sees what is still held. */
+export async function activeWallets(hours = 24): Promise<Active[]> {
+  const since = Math.floor(Date.now() / 1000) - hours * 3600;
+  const [markets, bots] = await Promise.all([allMarkets(), botAddresses()]);
+  // a tx that touches a vault is vault plumbing (keeper rebalance, park-and-deploy hedge) whoever paid for it
+  const plumbing = (tx: ParsedTransactionWithMeta) => tx.transaction.message.accountKeys.some((k) => bots.has(k.pubkey.toBase58()));
+  const evs = (await Promise.all(markets.map((m) => marketEventsSince(m, since, plumbing).catch(() => [] as Ev[])))).flat();
+  type Acc = { in: bigint; out: bigint; trades: number; mk: Set<string>; last: number; tops: Map<string, { ticker: string; side: 0 | 1; q: bigint }> };
+  const agg = new Map<string, Acc>();
+  for (const e of evs) {
+    if (e.ts < since || bots.has(e.actor)) continue;
+    if (e.kind !== "buy" && e.kind !== "sell" && e.kind !== "redeem") continue;
+    const q = BigInt(e.quote ?? 0);
+    const a = agg.get(e.actor) ?? { in: 0n, out: 0n, trades: 0, mk: new Set<string>(), last: 0, tops: new Map() };
+    if (e.kind === "buy") a.in += q;
+    else a.out += q;
+    a.trades += 1;
+    a.mk.add(e.market);
+    a.last = Math.max(a.last, e.ts);
+    const k = `${e.market}:${e.side ?? 0}`;
+    const t = a.tops.get(k) ?? { ticker: e.ticker, side: e.side ?? 0, q: 0n };
+    t.q += q;
+    a.tops.set(k, t);
+    agg.set(e.actor, a);
+  }
+  const rows: Active[] = [...agg].map(([owner, a]) => {
+    const top = [...a.tops].sort(([, x], [, y]) => (y.q > x.q ? 1 : y.q < x.q ? -1 : 0))[0];
+    return {
+      owner,
+      in: a.in.toString(),
+      out: a.out.toString(),
+      net: (a.out - a.in).toString(),
+      trades: a.trades,
+      markets: a.mk.size,
+      last: a.last,
+      top: top ? { market: top[0].split(":")[0], ticker: top[1].ticker, side: top[1].side, quote: top[1].q.toString() } : null,
+    };
+  });
+  // most trades first; same count, more money moved wins
+  const vol = (r: Active) => BigInt(r.in) + BigInt(r.out);
+  // ranked by volume moved (in + out): the number that pays the pots, not the click count
+  return rows.sort((x, y) => (vol(y) > vol(x) ? 1 : vol(y) < vol(x) ? -1 : 0) || y.trades - x.trades).slice(0, 20);
+}

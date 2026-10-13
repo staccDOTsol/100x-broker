@@ -1,0 +1,1088 @@
+{
+  "address": "T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb",
+  "metadata": {
+    "name": "hooked",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "100x.broker: \u00b1100\u00d7 power-leverage pairs (UP / DOWN) on any coin with a Raydium CLMM pool. Both sides trade on Meteora DBC transfer-hook curves quoted in r-freestacc; every transfer of either token re-settles the two pots at power leverage 100 against the pool's TWAP (self-sampled from the pool tick when the ring is dead). Written in Pinocchio; instruction discriminators are one byte except the SPL transfer-hook Execute.",
+    "repository": "https://100x.broker"
+  },
+  "instructions": [
+    {
+      "name": "execute",
+      "docs": [
+        "SPL transfer-hook Execute: called by Token-2022 on every UP/DOWN transfer. Rebalances the pots at 1.0001^(-100\u00b7\u0394tick) against the oracle TWAP. Extra accounts come from the ExtraAccountMetaList."
+      ],
+      "discriminator": [
+        105,
+        37,
+        101,
+        197,
+        75,
+        251,
+        102,
+        26
+      ],
+      "accounts": [
+        {
+          "name": "source"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "destination"
+        },
+        {
+          "name": "owner"
+        },
+        {
+          "name": "extra_account_metas"
+        },
+        {
+          "name": "market",
+          "writable": true
+        },
+        {
+          "name": "oracle_observation"
+        },
+        {
+          "name": "vault_bull",
+          "writable": true
+        },
+        {
+          "name": "vault_bear",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "oracle_pool",
+          "optional": true,
+          "docs": [
+            "in the meta list of markets created after 2026-10-10; when the ring has been silent for an hour the market samples this pool's tick instead"
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "create_market",
+      "docs": [
+        "Permissionless. Pairs two DBC hook curves (created by the caller with this program as hook and the market PDA as fee claimer) into a \u00b1100\u00d7 market on a Raydium CLMM oracle. Quote is always r-freestacc."
+      ],
+      "discriminator": [
+        0
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "market",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bull_mint"
+              },
+              {
+                "kind": "account",
+                "path": "bear_mint"
+              },
+              {
+                "kind": "account",
+                "path": "oracle_observation"
+              },
+              {
+                "kind": "arg",
+                "path": "window_secs"
+              },
+              {
+                "kind": "arg",
+                "path": "underlying_is_token0"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault_bull",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "market"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  0
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault_bear",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "market"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  1
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "bull_mint"
+        },
+        {
+          "name": "bear_mint"
+        },
+        {
+          "name": "pool_bull",
+          "docs": [
+            "DBC TransferHookPool for UP"
+          ]
+        },
+        {
+          "name": "pool_bear"
+        },
+        {
+          "name": "base_vault_bull"
+        },
+        {
+          "name": "base_vault_bear"
+        },
+        {
+          "name": "quote_vault_bull"
+        },
+        {
+          "name": "quote_vault_bear"
+        },
+        {
+          "name": "quote_mint",
+          "address": "pSYRpDqr847kB2nD5ZhjcPsHLV2ZpUxweXm1MwiSTcc"
+        },
+        {
+          "name": "escrow_bull",
+          "docs": [
+            "ATA(bull_mint, market) under Token-2022"
+          ]
+        },
+        {
+          "name": "escrow_bear"
+        },
+        {
+          "name": "meta_list_bull",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  116,
+                  114,
+                  97,
+                  45,
+                  97,
+                  99,
+                  99,
+                  111,
+                  117,
+                  110,
+                  116,
+                  45,
+                  109,
+                  101,
+                  116,
+                  97,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bull_mint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "meta_list_bear",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  116,
+                  114,
+                  97,
+                  45,
+                  97,
+                  99,
+                  99,
+                  111,
+                  117,
+                  110,
+                  116,
+                  45,
+                  109,
+                  101,
+                  116,
+                  97,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "bear_mint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "oracle_pool",
+          "docs": [
+            "Raydium CLMM pool"
+          ]
+        },
+        {
+          "name": "oracle_observation",
+          "docs": [
+            "its ObservationState"
+          ]
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "window_secs",
+          "type": "u32"
+        },
+        {
+          "name": "underlying_is_token0",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "poke",
+      "docs": [
+        "Rebalance the pots against the current TWAP without a transfer. Anyone."
+      ],
+      "discriminator": [
+        1
+      ],
+      "accounts": [
+        {
+          "name": "market",
+          "writable": true
+        },
+        {
+          "name": "oracle_observation"
+        },
+        {
+          "name": "vault_bull",
+          "writable": true
+        },
+        {
+          "name": "vault_bear",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "oracle_pool",
+          "optional": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "redeem",
+      "docs": [
+        "Burn UP or DOWN for its pro-rata slice of that side's pot minus 4% (fee split 60% pots / 30% burn pot / 10% dev; 90% of the pots' share goes to the smaller pot)."
+      ],
+      "discriminator": [
+        2
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "signer": true
+        },
+        {
+          "name": "user_token",
+          "writable": true
+        },
+        {
+          "name": "mint",
+          "writable": true
+        },
+        {
+          "name": "user_quote",
+          "writable": true
+        },
+        {
+          "name": "market",
+          "writable": true
+        },
+        {
+          "name": "oracle_observation"
+        },
+        {
+          "name": "vault_bull",
+          "writable": true
+        },
+        {
+          "name": "vault_bear",
+          "writable": true
+        },
+        {
+          "name": "base_vault",
+          "docs": [
+            "the side's DBC base vault (circulating = supply \u2212 curve inventory)"
+          ]
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "token_2022_program",
+          "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+        },
+        {
+          "name": "burn_vault",
+          "writable": true
+        },
+        {
+          "name": "dev_ata",
+          "writable": true,
+          "address": "6Jrrws5TmFTb4eCa63A4yNnaSCC62yvvHYspK3KW4SEd"
+        },
+        {
+          "name": "oracle_pool",
+          "optional": true
+        }
+      ],
+      "args": [
+        {
+          "name": "side",
+          "type": "u8"
+        },
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "settle_begin",
+      "docs": [
+        "First of three instructions [settle_begin, DBC swap2_with_transfer_hook selling `amount` from the escrow into the losing side's curve with proceeds to the winning pot, settle_end]. Mints to the escrow and approves the caller for exactly `amount`; the sandwich is verified by instruction introspection."
+      ],
+      "discriminator": [
+        3
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "signer": true
+        },
+        {
+          "name": "market",
+          "writable": true
+        },
+        {
+          "name": "oracle_observation"
+        },
+        {
+          "name": "vault_bull",
+          "writable": true
+        },
+        {
+          "name": "vault_bear",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "token_2022_program",
+          "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+        },
+        {
+          "name": "mint",
+          "writable": true
+        },
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "dbc_pool"
+        },
+        {
+          "name": "instructions_sysvar",
+          "address": "Sysvar1nstructions1111111111111111111111111"
+        },
+        {
+          "name": "oracle_pool",
+          "optional": true
+        }
+      ],
+      "args": [
+        {
+          "name": "side",
+          "type": "u8"
+        },
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "settle_end",
+      "discriminator": [
+        4
+      ],
+      "accounts": [
+        {
+          "name": "market",
+          "writable": true
+        },
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "dbc_pool"
+        },
+        {
+          "name": "winner_vault"
+        },
+        {
+          "name": "token_2022_program",
+          "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "claim_fees",
+      "docs": [
+        "Sweep one side's accrued DBC trading fees (quote only) and split them 60/30/10. Anyone."
+      ],
+      "discriminator": [
+        5
+      ],
+      "accounts": [
+        {
+          "name": "market"
+        },
+        {
+          "name": "vault_bull",
+          "writable": true
+        },
+        {
+          "name": "vault_bear",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "token_2022_program",
+          "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+        },
+        {
+          "name": "dbc_program",
+          "address": "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN"
+        },
+        {
+          "name": "dbc_pool_authority"
+        },
+        {
+          "name": "dbc_config"
+        },
+        {
+          "name": "dbc_pool",
+          "writable": true
+        },
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "base_vault",
+          "writable": true
+        },
+        {
+          "name": "quote_vault",
+          "writable": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "quote_mint",
+          "address": "pSYRpDqr847kB2nD5ZhjcPsHLV2ZpUxweXm1MwiSTcc"
+        },
+        {
+          "name": "dbc_event_authority"
+        },
+        {
+          "name": "burn_vault",
+          "writable": true
+        },
+        {
+          "name": "dev_ata",
+          "writable": true,
+          "address": "6Jrrws5TmFTb4eCa63A4yNnaSCC62yvvHYspK3KW4SEd"
+        }
+      ],
+      "args": [
+        {
+          "name": "side",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "init_burn",
+      "docs": [
+        "Create the global buy-and-burn pot (idempotent)."
+      ],
+      "discriminator": [
+        6
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "burn_state",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  114,
+                  110,
+                  45,
+                  115,
+                  116,
+                  97,
+                  116,
+                  101
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "burn_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  117,
+                  114,
+                  110
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "quote_mint",
+          "address": "pSYRpDqr847kB2nD5ZhjcPsHLV2ZpUxweXm1MwiSTcc"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "burn_meme",
+      "docs": [
+        "Burn `amount` of $100XBRO and get paid from the pot at the venue price (pump.fun curve or PumpSwap pool) + 3%, capped at 5% of the pot per call, 60 s cooldown."
+      ],
+      "discriminator": [
+        7
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "signer": true
+        },
+        {
+          "name": "caller_meme_ata",
+          "writable": true
+        },
+        {
+          "name": "meme_mint",
+          "writable": true,
+          "address": "Fr28jEWz2msSCKLaHzus2nCKrwqbpTx2EyDYtsVVpump"
+        },
+        {
+          "name": "caller_quote_ata",
+          "writable": true
+        },
+        {
+          "name": "burn_vault",
+          "writable": true
+        },
+        {
+          "name": "burn_state",
+          "writable": true
+        },
+        {
+          "name": "stake_pool",
+          "address": "SzoSoRxsrL9sbFcwpbjbH5bRrzuvFtuytZTeuqZCfQ6"
+        },
+        {
+          "name": "bonding_curve"
+        },
+        {
+          "name": "pumpswap_pool"
+        },
+        {
+          "name": "pool_base_ata"
+        },
+        {
+          "name": "pool_quote_ata"
+        },
+        {
+          "name": "meme_program"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Market",
+      "discriminator": [
+        104,
+        111,
+        111,
+        107,
+        109,
+        107,
+        116,
+        49
+      ]
+    },
+    {
+      "name": "BurnState",
+      "discriminator": [
+        104,
+        111,
+        111,
+        107,
+        98,
+        114,
+        110,
+        49
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 0,
+      "name": "InvalidMarket"
+    },
+    {
+      "code": 1,
+      "name": "InvalidOracle"
+    },
+    {
+      "code": 2,
+      "name": "OracleWindowEmpty"
+    },
+    {
+      "code": 3,
+      "name": "InvalidMint"
+    },
+    {
+      "code": 4,
+      "name": "InvalidPool"
+    },
+    {
+      "code": 5,
+      "name": "InvalidVault"
+    },
+    {
+      "code": 6,
+      "name": "InvalidEscrow"
+    },
+    {
+      "code": 7,
+      "name": "InvalidProgram"
+    },
+    {
+      "code": 8,
+      "name": "InvalidPda"
+    },
+    {
+      "code": 9,
+      "name": "MissingSigner"
+    },
+    {
+      "code": 10,
+      "name": "SettleInProgress"
+    },
+    {
+      "code": 11,
+      "name": "NotSettling"
+    },
+    {
+      "code": 12,
+      "name": "NothingOwed"
+    },
+    {
+      "code": 13,
+      "name": "SettleSandwich"
+    },
+    {
+      "code": 14,
+      "name": "EscrowNotEmpty"
+    },
+    {
+      "code": 15,
+      "name": "Overshoot"
+    },
+    {
+      "code": 16,
+      "name": "NoProceeds"
+    },
+    {
+      "code": 17,
+      "name": "ZeroAmount"
+    },
+    {
+      "code": 18,
+      "name": "ExceedsCirculating"
+    },
+    {
+      "code": 19,
+      "name": "MathOverflow"
+    },
+    {
+      "code": 20,
+      "name": "MemeNotSet"
+    },
+    {
+      "code": 21,
+      "name": "InvalidVenue"
+    },
+    {
+      "code": 22,
+      "name": "BurnCooldown"
+    },
+    {
+      "code": 23,
+      "name": "BurnTooLarge"
+    },
+    {
+      "code": 24,
+      "name": "InvalidBurnAccounts"
+    }
+  ],
+  "types": [
+    {
+      "name": "Ckpt",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "ts",
+            "type": "u32"
+          },
+          {
+            "name": "pad",
+            "type": "u32"
+          },
+          {
+            "name": "tick_cumulative",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Market",
+      "docs": [
+        "1008 bytes, repr(C). Discriminator \"hookmkt1\". Seeds [\"market\", bull_mint, bear_mint, oracle_obs, window_secs le u32 ++ underlying_is_token0]."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bull_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "bear_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "quote_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "oracle_pool",
+            "type": "pubkey"
+          },
+          {
+            "name": "oracle_obs",
+            "type": "pubkey"
+          },
+          {
+            "name": "vault_bull",
+            "type": "pubkey"
+          },
+          {
+            "name": "vault_bear",
+            "type": "pubkey"
+          },
+          {
+            "name": "pool_bull",
+            "type": "pubkey"
+          },
+          {
+            "name": "pool_bear",
+            "type": "pubkey"
+          },
+          {
+            "name": "base_vault_bull",
+            "type": "pubkey"
+          },
+          {
+            "name": "base_vault_bear",
+            "type": "pubkey"
+          },
+          {
+            "name": "escrow_bull",
+            "type": "pubkey"
+          },
+          {
+            "name": "escrow_bear",
+            "type": "pubkey"
+          },
+          {
+            "name": "last_twap_q32",
+            "type": "i64",
+            "docs": [
+              "TWAP tick (token1 per token0) in Q32 at the last rebalance"
+            ]
+          },
+          {
+            "name": "keep_bull_q63",
+            "type": "u64",
+            "docs": [
+              "price fraction the UP curve still owes to settle (1.0 = nothing)"
+            ]
+          },
+          {
+            "name": "keep_bear_q63",
+            "type": "u64"
+          },
+          {
+            "name": "settle_target_sqrt",
+            "type": "u128"
+          },
+          {
+            "name": "settle_vault_pre",
+            "type": "u64"
+          },
+          {
+            "name": "settle_amount",
+            "type": "u64"
+          },
+          {
+            "name": "window_secs",
+            "type": "u32"
+          },
+          {
+            "name": "last_obs_ts",
+            "type": "u32"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "underlying_is_token0",
+            "type": "u8"
+          },
+          {
+            "name": "settling",
+            "type": "u8"
+          },
+          {
+            "name": "settle_side",
+            "type": "u8"
+          },
+          {
+            "name": "ckpt_head",
+            "type": "u8"
+          },
+          {
+            "name": "padding",
+            "type": {
+              "array": [
+                "u8",
+                3
+              ]
+            }
+          },
+          {
+            "name": "ckpts",
+            "type": {
+              "array": [
+                {
+                  "defined": {
+                    "name": "Ckpt"
+                  }
+                },
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "BurnState",
+      "docs": [
+        "PDA [\"burn-state\"]; the pot is the PDA [\"burn\"] token account."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "vault_bump",
+            "type": "u8"
+          },
+          {
+            "name": "padding",
+            "type": {
+              "array": [
+                "u8",
+                6
+              ]
+            }
+          },
+          {
+            "name": "last_ts",
+            "type": "i64"
+          },
+          {
+            "name": "total_burned",
+            "type": "u64"
+          },
+          {
+            "name": "total_paid",
+            "type": "u64"
+          }
+        ]
+      }
+    }
+  ]
+}
