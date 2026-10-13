@@ -27,7 +27,7 @@ import { SwapMode } from "@meteora-ag/dynamic-bonding-curve-sdk";
 import BN from "bn.js";
 import { buildSettleTx, conn, dbc, decodeMarket, marketsForOracle, oracleHealth, quoteSymbolOf, settleAmount, toV0, userBalances, type MarketView } from "../src/lib/chain.js";
 import { claimFeesIx, createMarketIx, cu, marketPda, pokeIx, sideAccounts, type MarketKeys } from "../src/lib/hooked.js";
-import { VENUE_LABEL, candidateEffectiveQuote, candidateMove1PctQuote, candidateMove1PctUsd, candidateTvlUsd, decodeVenuePool, discoverPools, pumpSwapEffectiveQuote, pumpSwapVirtualQuote, tokenAmount, type PoolCandidate } from "../src/lib/venues.js";
+import { VENUE_LABEL, candidateEffectiveQuote, candidateMove1PctQuote, candidateMove1PctUsd, candidateTvlUsd, decodeVenuePool, discoverPools, patchPoolVolumes, poolsMissingVolume, pumpSwapEffectiveQuote, pumpSwapVirtualQuote, tokenAmount, type PoolCandidate } from "../src/lib/venues.js";
 import { marketCurve } from "../src/lib/curve.js";
 import { depositOut, depositSolIx, poolState, withdrawCapacity, withdrawOut, withdrawSolIx, type PoolState } from "../src/lib/zap.js";
 import { growthSince, listVaults, loadVault, shareBalance, vaultCreatedTs, withdrawIxs, type VaultView } from "../src/lib/dn.js";
@@ -40,6 +40,7 @@ import { ARENA } from "../src/arena.js";
 import { activeWallets } from "./_lib/feed.js";
 import { allViews } from "./_lib/views.js";
 import { memo, peek } from "./_lib/memo.js";
+import { poolVolumes } from "./_lib/poolvol.js";
 
 // arena memo windows (ms): 15 s fresh, served stale for two minutes while one background refresh runs
 const TTL = 15_000;
@@ -489,6 +490,8 @@ type Candidate = PoolCandidate & { health: ReturnType<typeof oracleHealth> | nul
 async function oracleCandidates(mint: PublicKey, keep?: PublicKey): Promise<Candidate[]> {
   const [cands, sol] = await Promise.all([discoverPools(conn, mint), solUsdQuick()]);
   if (!cands.length) return [];
+  // PumpSwap's API has no volume: Birdeye (api/_lib/poolvol.ts, memoized) fills volume24h / tvl where the venue left null
+  for (const batch of poolsMissingVolume(cands)) patchPoolVolumes(cands, await poolVolumes(batch));
   const scored = cands.map((c) => {
     const health = c.obsData ? oracleHealth(c.obsData) : null;
     // AMMs: usable once the quote the venue prices against is positive (PumpSwap: vault + virtual_quote_reserves)

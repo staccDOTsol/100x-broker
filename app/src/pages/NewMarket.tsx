@@ -5,7 +5,7 @@ import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction } from "@solana/spl-token";
 import { conn, dbc, marketsForOracle, oracleHealth, sendRaw, type OracleHealth } from "../lib/chain";
 import { createMarketIx, cu, marketPda, sideAccounts, type MarketKeys } from "../lib/hooked";
-import { VENUE_LABEL, candidateEffectiveQuote, candidateMove1PctQuote, candidateMove1PctUsd, candidateTvlUsd, decodeVenuePool, discoverPools, quoteSymbolOf, type PoolCandidate } from "../lib/venues";
+import { VENUE_LABEL, candidateEffectiveQuote, candidateMove1PctQuote, candidateMove1PctUsd, candidateTvlUsd, decodeVenuePool, discoverPools, patchPoolVolumes, poolsMissingVolume, quoteSymbolOf, type PoolCandidate, type PoolVol } from "../lib/venues";
 import { marketCurve } from "../lib/curve";
 import { humanError } from "../hooks";
 import { usePrices } from "../hooks/price";
@@ -128,6 +128,12 @@ export default function NewMarket() {
         const [asset, candidates] = await Promise.all([getUnderlying(mint.toBase58()), discoverPools(conn, mint)]);
         if (!alive) return;
         if (!candidates.length) throw new Error("No pool against SOL/USDC/USDT for this token on Raydium (CLMM/CPMM), PumpSwap or Meteora (DAMM v2/DLMM) — it needs one to have an oracle.");
+        // PumpSwap's API has no volume: one batched /api/poolvol (Birdeye, server-keyed) fills it so those pools rank honestly; nothing back keeps "—"
+        for (const batch of poolsMissingVolume(candidates)) {
+          const vols = await fetch(`/api/poolvol?ids=${batch.join(",")}`).then((r) => (r.ok ? (r.json() as Promise<Record<string, PoolVol>>) : {})).catch(() => ({}) as Record<string, PoolVol>);
+          patchPoolVolumes(candidates, vols);
+        }
+        if (!alive) return;
         const wanted = pinnedPool ?? (q.get("pool") ? new PublicKey(q.get("pool")!) : null);
         const all: PoolRow[] = candidates.map((c) => ({ ...c, health: c.obsData ? oracleHealth(c.obsData) : null }));
         // a usable oracle first, then where the volume is (hardest pool to push around), then depth (USD; PumpSwap has no
