@@ -57,7 +57,11 @@ export function Runners() {
         <span className="right num">
           {tradable ? `${tradable} live` : ""}
           {tradable && listable ? " · " : ""}
-          {listable ? `${listable} listable` : ""}
+          {listable ? (
+            <Link to="/new" className="runners-cta">
+              {listable} unlisted · be first →
+            </Link>
+          ) : null}
         </span>
       </h2>
       <div className="runners-strip">
@@ -85,15 +89,15 @@ function RunnerCard({ r }: { r: Runner }) {
       </div>
       <div className="runner-nums num">
         <Delta x={chg / 100} dp={1} />
-        <span className="muted">mc {mcap(r.mc)}</span>
+        <span className="muted">{r.market ? `mc ${mcap(r.mc)}` : r.listable ? "no market yet" : `mc ${mcap(r.mc)}`}</span>
       </div>
       {r.market ? (
         <Link className="runner-act go up" to={path}>
           Trade · UP {levOf(r.market.levUp)}
         </Link>
       ) : r.listable ? (
-        <Link className="runner-act go list" to={path}>
-          List it · LFG
+        <Link className="runner-act go list" to={path} title={`Raydium CLMM vs ${r.listable.quote} · $${Math.round(r.listable.tvl).toLocaleString("en-US")} TVL`}>
+          List ${r.symbol} · LFG
         </Link>
       ) : r.venue_hint === "pumpswap" ? (
         <span className="runner-act off">soon · pumpswap</span>
