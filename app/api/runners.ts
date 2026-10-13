@@ -1,25 +1,22 @@
 // GET /api/runners -> what's trending on Solana right now (Birdeye), each coin tagged with what the degen can do about it here:
 //   market   -> we already run a board for it: { key, levUp, levDown }            (Trade)
-//   listable -> a Raydium CLMM pool vs SOL/USDC/USDT exists: { id, quote, tvl }    (List it, one click on /new)
-//   venue_hint 'pumpswap' -> no CLMM pool but a pump.fun mint; PumpSwap/CPMM oracles are coming, so "soon" rather than "no"
-// Whole payload memoized 60 s fresh / 600 s stale; per-mint Raydium lookups 10 min / 1 h. No key -> { runners: [] } with 200.
+//   listable -> the deepest usable oracle pool vs SOL/USDC/USDT on any venue (Raydium CLMM/CPMM, PumpSwap, Meteora DAMM v2/DLMM):
+//               { id, venue, quote, tvl }                                          (List it, one click on /new)
+//   venue_hint -> the listable venue (kept for older clients), null when nothing is listable
+// Whole payload memoized 60 s fresh / 600 s stale; per-mint venue discovery 10 min / 1 h. No key -> { runners: [] } with 200.
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { allViews } from "./_lib/views.js";
+import { PublicKey } from "@solana/web3.js";
+import { allViews, retry } from "./_lib/views.js";
 import { memo, peek } from "./_lib/memo.js";
-import type { MarketView } from "../src/lib/chain.js";
+import { type MarketView, conn, oracleHealth } from "../src/lib/chain.js";
+import { type PoolCandidate, type Venue, candidateEffectiveQuote, candidateTvlUsd, discoverPools } from "../src/lib/venues.js";
 
 const BIRDEYE = "https://public-api.birdeye.so/defi/token_trending?sort_by=rank&sort_type=asc&offset=0&limit=50";
-const RAYDIUM = "https://api-v3.raydium.io/pools/info/mint";
-const CLMM_PROGRAM = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
-const QUOTES: Record<string, string> = {
-  SOL: "So11111111111111111111111111111111111111112",
-  USDC: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-  USDT: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
-};
+const SOL = "So11111111111111111111111111111111111111112";
 const CAP = 50;
 const WIDTH = 8; // enrichment concurrency
 
-export type Listable = { id: string; quote: string; tvl: number };
+export type Listable = { id: string; venue: Venue; quote: string; tvl: number };
 export type Market = { key: string; levUp: number | null; levDown: number | null };
 export type Runner = {
   mint: string;
@@ -35,7 +32,7 @@ export type Runner = {
   pump: boolean;
   market: Market | null;
   listable: Listable | null;
-  venue_hint: "clmm" | "pumpswap" | null;
+  venue_hint: Venue | null;
 };
 export type Payload = { at: number; runners: Runner[]; error?: string };
 
@@ -73,26 +70,28 @@ async function trending(key: string): Promise<Trending[]> {
   return out.slice(0, CAP);
 }
 
-/** The deepest Raydium CLMM pool for this mint against one of the quotes our oracle reads, or null. Memoized per mint. */
-const clmmPool = (mint: string): Promise<Listable | null> =>
-  memo(`runners:clmm:${mint}`, 600_000, 3_600_000, async () => {
+/** SOL/USD for PumpSwap depth (its API publishes no TVL; depth = 2 × SOL reserve × price). Same memo key as /api/price. */
+const solUsd = (): Promise<number | null> =>
+  memo("price:sol", 5_000, 30_000, async () => {
+    const r = await fetch(`https://lite-api.jup.ag/price/v3?ids=${SOL}`, { signal: AbortSignal.timeout(5000) });
+    const p = Number(((await r.json()) as any)?.[SOL]?.usdPrice);
+    if (!Number.isFinite(p) || p <= 0) throw new Error("no jup price");
+    return p;
+  }).catch(() => null);
+
+/** Same bar /new sets: a CLMM needs a ring with at least one observation; an AMM needs a positive (effective) quote reserve. */
+const usable = (c: PoolCandidate) => (c.venue === "clmm" ? !!c.obsData && oracleHealth(c.obsData).ok : (candidateEffectiveQuote(c) ?? 0n) > 0n);
+
+/** The deepest usable oracle pool for this mint on any venue, or null. Memoized per mint; a failed discovery is not cached
+ *  (the memo throws, the caller turns that into null for this round only). */
+const bestPool = (mint: string, sol: number | null): Promise<Listable | null> =>
+  memo(`runners:pool:${mint}`, 600_000, 3_600_000, async () => {
+    const pools = await retry(() => discoverPools(conn, new PublicKey(mint)));
     let best: Listable | null = null;
-    for (const [quote, qmint] of Object.entries(QUOTES)) {
-      const u = `${RAYDIUM}?mint1=${mint}&mint2=${qmint}&poolType=concentrated&poolSortField=liquidity&sortType=desc&pageSize=3&page=1`;
-      try {
-        const r = await fetch(u);
-        if (!r.ok) continue;
-        const j: any = await r.json();
-        for (const p of j?.data?.data ?? []) {
-          if (p?.programId !== CLMM_PROGRAM || !p?.id) continue;
-          const a = p.mintA?.address, b = p.mintB?.address;
-          if (!((a === mint && b === qmint) || (b === mint && a === qmint))) continue;
-          const tvl = Number(p.tvl ?? 0);
-          if (!best || tvl > best.tvl) best = { id: String(p.id), quote, tvl };
-        }
-      } catch {
-        /* this quote stays unknown; the others still count */
-      }
+    for (const c of pools) {
+      if (!usable(c)) continue;
+      const tvl = candidateTvlUsd(c, sol) ?? 0;
+      if (!best || tvl > best.tvl) best = { id: c.pool.toBase58(), venue: c.venue, quote: c.quote, tvl };
     }
     return best;
   });
@@ -130,12 +129,11 @@ async function pmap<T, U>(xs: T[], width: number, f: (x: T) => Promise<U>): Prom
 
 /** The whole strip: trending + enrichment. Exported so it can be exercised without an HTTP server. */
 export async function loadRunners(key: string): Promise<Payload> {
-  const [list, markets] = await Promise.all([trending(key), marketsByMint().catch(() => new Map<string, Market>())]);
+  const [list, markets, sol] = await Promise.all([trending(key), marketsByMint().catch(() => new Map<string, Market>()), solUsd()]);
   const runners = await pmap(list, WIDTH, async (t): Promise<Runner> => {
     const market = markets.get(t.mint) ?? null;
-    const listable = await clmmPool(t.mint).catch(() => null);
-    const venue_hint: Runner["venue_hint"] = listable ? "clmm" : t.pump ? "pumpswap" : null;
-    return { ...t, market, listable, venue_hint };
+    const listable = await bestPool(t.mint, sol).catch(() => null);
+    return { ...t, market, listable, venue_hint: listable?.venue ?? null };
   });
   return { at: Date.now(), runners };
 }
