@@ -214,8 +214,21 @@ export const burnFeed = (limit = 20): Promise<Ev[]> =>
 export const globalFeed = (perMarket = 15): Promise<Ev[]> =>
   memo(`feed:global:${perMarket}`, FEED_TTL, FEED_STALE, async () => {
     const markets = await allMarkets();
-    const feeds = await Promise.all([...markets.map((m) => marketFeed(m, perMarket).catch(() => [] as Ev[])), burnFeed(20).catch(() => [] as Ev[])]);
-    return feeds.flat().sort((a, b) => b.ts - a.ts).slice(0, 60);
+    // a market whose refresh fails (rate limit, flaky upstream) keeps its last good list; it must not become [] and get memoized as "quiet"
+    let failed = 0;
+    const feeds = await Promise.all([
+      ...markets.map((m) =>
+        marketFeed(m, perMarket).catch(() => {
+          failed++;
+          return peek<Ev[]>(`feed:market:${m.toBase58()}:${perMarket}`) ?? ([] as Ev[]);
+        }),
+      ),
+      burnFeed(20).catch(() => peek<Ev[]>("feed:burn:20") ?? ([] as Ev[])),
+    ]);
+    const all = feeds.flat().sort((a, b) => b.ts - a.ts).slice(0, 60);
+    // nothing came back and something broke: that's an outage, not an empty board — throw so memo serves the previous value / retries next call
+    if (all.length === 0 && failed > 0) throw new Error(`feed: ${failed}/${markets.length} markets failed upstream`);
+    return all;
   });
 
 const T22 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
