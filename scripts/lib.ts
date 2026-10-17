@@ -17,7 +17,7 @@ import {
   deriveDbcTokenVaultAddress,
 } from "@meteora-ag/dynamic-bonding-curve-sdk";
 
-export const PROGRAM_ID = new PublicKey(process.env.HOOKED_PROGRAM_ID ?? "T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb");
+export const PROGRAM_ID = new PublicKey(process.env.HOOKED_PROGRAM_ID ?? "9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6");
 export const RFSTACC = new PublicKey("pSYRpDqr847kB2nD5ZhjcPsHLV2ZpUxweXm1MwiSTcc");
 export const DBC = new PublicKey("dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN");
 export const DEV_ATA = new PublicKey("6Jrrws5TmFTb4eCa63A4yNnaSCC62yvvHYspK3KW4SEd");
@@ -309,4 +309,70 @@ export async function send(conn: Connection, tx: Transaction, signers: Keypair[]
     throw new Error(`tx failed: ${JSON.stringify(res.value.err ?? got?.meta?.err)}`);
   }
   return { sig, logs: got?.meta?.logMessages ?? [], cu: got?.meta?.computeUnitsConsumed };
+}
+
+// ---------- pump companions (mirrors app/src/lib/hooked.ts launch section) ----------
+export const TAG_REGISTER_LAUNCH = 8;
+export const TAG_BOOST = 9;
+export const LAUNCH_MODE_SHARED = 0;
+export const LAUNCH_MODE_FULL = 1;
+export const LAUNCH_MODE_SOLE = LAUNCH_MODE_FULL;
+export const LAUNCH_CREATOR_FEE_BPS = 300;
+export const MEME_MINT = new PublicKey(process.env.MEME_MINT ?? "Fr28jEWz2msSCKLaHzus2nCKrwqbpTx2EyDYtsVVpump");
+/** On-chain Launch: 144 bytes, disc `hooklnch`. curve is derived from mint. */
+export const LAUNCH_LAYOUT = { len: 144, market: 8, mint: 40, lister: 72, side: 104, mode: 105, bump: 106, solBump: 107, totalSold: 112, totalBurned: 120, totalLister: 128, totalBoost: 136 } as const;
+const LAUNCH_DISC = Buffer.from("hooklnch");
+export type Launch = {
+  key: PublicKey; market: PublicKey; mint: PublicKey; curve: PublicKey; lister: PublicKey; side: 0 | 1; mode: number;
+  bump: number; solBump: number; totalSold: bigint; totalBurned: bigint; totalLister: bigint; totalBoost: bigint;
+};
+export const launchPda = (market: PublicKey, side: number) => PublicKey.findProgramAddressSync([Buffer.from("launch"), market.toBuffer(), Buffer.from([side])], PROGRAM_ID)[0];
+export const launchSolPda = (market: PublicKey, side: number) => PublicKey.findProgramAddressSync([Buffer.from("launch-sol"), market.toBuffer(), Buffer.from([side])], PROGRAM_ID)[0];
+export const pumpCurvePda = (mint: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("bonding-curve"), mint.toBuffer()], PUMP)[0];
+export const PUMP_FEES = new PublicKey("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
+export const sharingConfigPda = (mint: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("sharing-config"), mint.toBuffer()], PUMP_FEES)[0];
+const STAKE_POOL_PROGRAM = new PublicKey("SP12tWFxD9oJsVWNavTTBZvMbA6gkAmxtVgxdqvyvhY");
+const PS_FEE_CONFIG_SEED = Buffer.from([12, 20, 222, 252, 130, 94, 198, 118, 148, 37, 8, 24, 187, 101, 64, 101, 244, 41, 141, 49, 86, 213, 113, 180, 212, 248, 9, 12, 24, 233, 168, 99]);
+export function decodeLaunch(key: PublicKey, d: Buffer): Launch | null {
+  if (d.length !== LAUNCH_LAYOUT.len || !d.subarray(0, 8).equals(LAUNCH_DISC)) return null;
+  const pk = (o: number) => new PublicKey(d.subarray(o, o + 32));
+  const side = d[LAUNCH_LAYOUT.side];
+  if (side !== 0 && side !== 1) return null;
+  const mint = pk(LAUNCH_LAYOUT.mint);
+  return {
+    key, market: pk(LAUNCH_LAYOUT.market), mint, curve: pumpCurvePda(mint), lister: pk(LAUNCH_LAYOUT.lister), side, mode: d[LAUNCH_LAYOUT.mode],
+    bump: d[LAUNCH_LAYOUT.bump], solBump: d[LAUNCH_LAYOUT.solBump],
+    totalSold: d.readBigUInt64LE(LAUNCH_LAYOUT.totalSold), totalBurned: d.readBigUInt64LE(LAUNCH_LAYOUT.totalBurned),
+    totalLister: d.readBigUInt64LE(LAUNCH_LAYOUT.totalLister), totalBoost: d.readBigUInt64LE(LAUNCH_LAYOUT.totalBoost),
+  };
+}
+/** register_launch(side, mode): lister (signer, payer), market, Launch PDA (init), pump mint, bonding curve, system, sharing config. */
+export function registerLaunchIx(lister: PublicKey, market: PublicKey, side: number, mode: number, pumpMint: PublicKey) {
+  return new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [s(lister), r(market), w(launchPda(market, side)), r(pumpMint), r(pumpCurvePda(pumpMint)), r(SystemProgram.programId), r(sharingConfigPda(pumpMint))],
+    data: tag(TAG_REGISTER_LAUNCH, Buffer.from([side, mode])),
+  });
+}
+export type BoostVenue = { poolBase: PublicKey; poolQuote: PublicKey; buybackFeeRecipient: PublicKey; reserveStake: PublicKey; managerFee: PublicKey };
+/** boost(min_quote_out). Same 28-account order as `boost` in processor.rs. */
+export function boostIx(caller: PublicKey, launch: Launch, venue: BoostVenue, minQuoteOut: bigint) {
+  const memeAta = (owner: PublicKey) => getAssociatedTokenAddressSync(MEME_MINT, owner, true, TOKEN_2022_PROGRAM_ID);
+  const pool = pumpSwapCanonicalPool(MEME_MINT);
+  const globalConfig = PublicKey.findProgramAddressSync([Buffer.from("global_config")], PUMPSWAP)[0];
+  const userVolume = PublicKey.findProgramAddressSync([Buffer.from("user_volume_accumulator"), launch.key.toBuffer()], PUMPSWAP)[0];
+  const feeConfig = PublicKey.findProgramAddressSync([Buffer.from("fee_config"), PS_FEE_CONFIG_SEED], PUMP_FEES)[0];
+  const eventAuthority = PublicKey.findProgramAddressSync([Buffer.from("__event_authority")], PUMPSWAP)[0];
+  const withdraw = PublicKey.findProgramAddressSync([STAKE_POOL_ACCT.toBuffer(), Buffer.from("withdraw")], STAKE_POOL_PROGRAM)[0];
+  return new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      s(caller), r(launch.market), w(launch.key), w(memeAta(launch.key)), w(memeAta(launch.lister)), w(vaultPda(launch.market, launch.side)),
+      w(launchSolPda(launch.market, launch.side)), w(getAssociatedTokenAddressSync(WSOL_MINT, launch.key, true, TOKEN_PROGRAM_ID)),
+      w(MEME_MINT), r(WSOL_MINT), r(TOKEN_2022_PROGRAM_ID), r(TOKEN_PROGRAM_ID), r(SystemProgram.programId), r(PUMPSWAP),
+      r(globalConfig), w(pool), w(venue.poolBase), w(venue.poolQuote), w(userVolume), r(feeConfig), w(venue.buybackFeeRecipient), r(eventAuthority),
+      r(STAKE_POOL_PROGRAM), w(STAKE_POOL_ACCT), r(withdraw), w(venue.reserveStake), w(venue.managerFee), w(RFSTACC),
+    ],
+    data: tag(TAG_BOOST, u64(minQuoteOut)),
+  });
 }

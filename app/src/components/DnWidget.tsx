@@ -1,86 +1,100 @@
-// The vault, where the trade is: on every market page, the delta-neutral vault built on this market (if any)
-// with its dopamine numbers and the same Park/Unpark slip as /yield. Monitor-shaped (numbers first), the slip below.
+// Yield, where the trade is: the third option on every market's ticket (Long · Short · Yield). If a delta-neutral vault is built on
+// this market it shows its dopamine numbers and the Park/Unpark slip; if not, the option is disabled with a one-line reason.
+// A WSOL market (SOL) can't carry a vault, so it opens the vault on its oracle pool instead: the SOL/USDC LP, which sits on the USDC market.
 import { Link } from "react-router-dom";
 import { PublicKey } from "@solana/web3.js";
 import { usePoll } from "../hooks";
-import { vaultsForMarket } from "../lib/dn";
-import { HedgeBadge, VaultNums, loadRow, pct0, vaultNumbers, type Row } from "../pages/Yield";
+import { useUnderlying } from "../hooks/underlying";
+import { vaultsForMarket, vaultsForPool } from "../lib/dn";
+import { HedgeBadge, LopsidedNote, VaultNums, VaultStats, loadRow, pct0, vaultNumbers, type Row } from "../pages/Yield";
 import { Flex, useRefWallet, vaultShare } from "./Flex";
 import { VaultTicket } from "./VaultTicket";
 
-type Props = { market: PublicKey; ticker: string; quote: string; onDone: () => void };
+export type MarketVault = { row: Row | null; loading: boolean; error: string | null; refresh: () => void };
 
-export function DnWidget({ market, ticker, quote, onDone }: Props) {
+/**
+ * The market's vault (the first the chain lists for it, else the first on its oracle pool), polled. `oraclePool` is null until the market
+ * itself has loaded; the answer stays "loading" until then, and a result for another market (the switcher) is never shown.
+ */
+export function useMarketVault(market: PublicKey | null, oraclePool: PublicKey | null): MarketVault {
+  const k = `${market?.toBase58()}/${oraclePool?.toBase58()}`;
+  const r = usePoll<{ k: string; row: Row | null }>(async () => {
+    if (!market || !oraclePool) return { k, row: null };
+    let vs = await vaultsForMarket(market);
+    if (!vs.length) vs = await vaultsForPool(oraclePool);
+    return { k, row: vs.length ? await loadRow(vs[0]) : null };
+  }, [k]);
+  const cur = oraclePool && r.data?.k === k ? r.data : null;
+  return { row: cur?.row ?? null, loading: !cur && !r.error, error: cur ? null : r.error, refresh: r.refresh };
+}
+
+/** Why Yield can't be picked on this market, in a few words and in full; null while the lookup runs or when there's a vault. */
+export function yieldBlocker(m: MarketVault, quote: string, ticker: string): { short: string; full: string } | null {
+  if (m.row) return null;
+  if (m.loading) return null;
+  if (m.error) return { short: "vaults offline", full: `Couldn't look for a $${ticker} vault: ${m.error}. Retrying.` };
+  if (quote !== "SOL")
+    return { short: "SOL pairs only", full: `Vaults pair a coin against SOL and hedge it with its DOWN. This market is priced in ${quote}, so there's no SOL leg to hedge.` };
+  return { short: "no vault yet", full: `No yield vault for $${ticker} yet. A vault LPs ${ticker}/SOL on Raydium and hedges the ${ticker} half with this market's DOWN.` };
+}
+
+/** The ticket's Yield button copy: the projected APY when the pool rate is known. */
+export function yieldApy(row: Row): number | null {
+  const { compounded, sustained } = vaultNumbers(row);
+  return compounded ?? sustained;
+}
+
+/** The coin the vault LPs against SOL: this market's own ticker when the vault sits on it, otherwise the vault's own coin (SOL's vault holds USDC). */
+export function useVaultCoin(vault: MarketVault, market: PublicKey, ticker: string) {
+  const r = vault.row;
+  const own = !r || r.v.market.equals(market);
+  const under = useUnderlying(own ? undefined : r?.underlying);
+  return { own, coin: own ? ticker : (under?.symbol ?? "…") };
+}
+
+export function YieldPane({ vault, market, ticker, onDone }: { vault: MarketVault; market: PublicKey; ticker: string; onDone: () => void }) {
   const refWallet = useRefWallet();
-  const row = usePoll<Row | null>(async () => {
-    const vs = await vaultsForMarket(market);
-    return vs.length ? loadRow(vs[0]) : null;
-  }, [market.toBase58()]);
-
-  if (row.loading && row.data === undefined) {
-    return (
-      <div className="dnw-skel" aria-busy="true" aria-label="Looking for a vault">
-        <span className="skeleton" />
-        <span className="skeleton" />
-        <span className="skeleton" />
-      </div>
-    );
-  }
-  if (row.error && !row.data) {
-    return (
-      <div className="dnw-empty" role="alert">
-        <strong>Couldn't check for a vault.</strong>
-        <span className="meta">{row.error}</span>
-        <button className="linkish" onClick={() => row.refresh()}>
-          try again →
-        </button>
-      </div>
-    );
-  }
-  const r = row.data ?? null;
+  const { own, coin } = useVaultCoin(vault, market, ticker);
+  const r = vault.row;
   if (!r) {
-    return quote === "SOL" ? (
-      <div className="dnw-empty">
-        <strong>No vault for ${ticker} yet.</strong>
-        <span>
-          A vault would LP {ticker}/SOL on Raydium and hedge the {ticker} half with this market's DOWN, so what's left is pool fees — no
-          direction, no funding, no liquidations.
-        </span>
-        <span className="meta">
-          <Link to="/yield">See the vaults that exist →</Link>
-        </span>
-      </div>
-    ) : (
-      <div className="dnw-empty">
-        <strong>Nothing to park here.</strong>
-        <span>
-          Vaults pair a coin against SOL and hedge it with its DOWN. This market is priced in {quote}, so there's no SOL leg to hedge.
-        </span>
-        <span className="meta">
-          <Link to="/yield">See the vaults that exist →</Link>
-        </span>
+    return (
+      <div className="ticket-body dnw">
+        <div className="dnw-skel" aria-busy="true" aria-label="Looking for a vault">
+          <span className="skeleton" />
+          <span className="skeleton" />
+          <span className="skeleton" />
+        </div>
       </div>
     );
   }
-
-  const key = r.v.key.toBase58();
+  const apy = yieldApy(r);
+  const home = `/m/${r.v.market.toBase58()}`;
   return (
-    <>
+    <div className="ticket-body dnw">
       <div className="dnw-head">
         <span className="pair">
-          ${ticker} <small>/ SOL · parked {(Number(r.x.nav) / 1e9).toFixed(3)} SOL</small>
+          ${coin} <small>/ SOL{own ? "" : " LP"} · parked {(Number(r.x.nav) / 1e9).toFixed(3)} SOL</small>
         </span>
         <span className="dnw-head-right">
-          <HedgeBadge r={r} /> <Link to={`/yield/${key}`} className="meta">details →</Link>{" "}
-          <Flex target={vaultShare(r.v.key, ticker, refWallet, (() => { const p = vaultNumbers(r).projected; return p !== null ? pct0(Math.pow(1 + p / 365, 365) - 1) : null; })())} />
+          <HedgeBadge r={r} /> <Flex target={vaultShare(r.v.key, coin, refWallet, apy !== null ? pct0(apy) : null)} />
         </span>
       </div>
+      {!own && (
+        <p className="note">
+          ${ticker} can't be a vault's coin, so this is the {coin}/SOL LP: same Raydium pool, built on the <Link to={home}>{coin}/SOL market</Link>.
+        </p>
+      )}
       <VaultNums r={r} />
-      <VaultTicket view={r} ticker={ticker} onDone={() => (row.refresh(), onDone())} className="in-panel" />
+      <LopsidedNote r={r} ticker={coin} />
+      <VaultTicket view={r} ticker={coin} onDone={() => (vault.refresh(), onDone())} className="in-panel" />
       <p className="note">
-        Half your SOL becomes {ticker}, both halves go into the Raydium pool, and the {ticker} half is shorted with this market's DOWN.
-        Price goes anywhere, you keep the fees.
+        Half your SOL becomes {coin}, both halves go into the Raydium pool, and the {coin} half is shorted with{" "}
+        {own ? "this market's" : <Link to={`${home}?side=1`}>the {coin}/SOL market's</Link>} DOWN. Price goes anywhere, you keep the fees.
       </p>
-    </>
+      <details className="fine">
+        <summary>vault details</summary>
+        <VaultStats r={r} ticker={coin} />
+      </details>
+    </div>
   );
 }

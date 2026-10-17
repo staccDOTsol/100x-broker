@@ -9,13 +9,34 @@ import { conn, loadMarketView, sendRaw, toV0 } from "./chain";
 import { cu } from "./hooked";
 import { track } from "@vercel/analytics";
 import { backIxs, MIN_SHARE_LAMPORTS, raiseOpen } from "./backable";
-import { withdrawIxs, type VaultView } from "./dn";
+import { DN_PROGRAM, withdrawIxs, type VaultView } from "./dn";
 import { exitIxs, planExit } from "./exit";
 import { poolState, withdrawSolIx, withdrawOut } from "./zap";
 import { RFSTACC, WSOL } from "../config";
+import { humanError } from "../hooks";
 
-export type StepStatus = "todo" | "signing" | "sending" | "done" | "failed";
-export type Step = { label: string; status: StepStatus; sig?: string; error?: string };
+// "held": the step didn't run and nothing was lost, it waits (a deploy the vault refused for now; the SOL stays parked)
+export type StepStatus = "todo" | "signing" | "sending" | "done" | "failed" | "held";
+export type Step = { label: string; status: StepStatus; sig?: string; error?: string; note?: string };
+
+/** The vault refused a deploy step with ZeroAmount (custom 6): the parked SOL was already put to work, i.e. the keeper's pass
+ *  ran between your park and your deploy (it polls every ~30 s and picks up any idle SOL). */
+const errText = (e: unknown) => `${e instanceof Error ? e.message : String(e)} ${JSON.stringify(e)}`;
+const dnCode = (e: unknown) => {
+  const m = errText(e).match(new RegExp(`${DN_PROGRAM.toBase58()} failed: custom program error: 0x([0-9a-f]+)\\b`, "i"));
+  return m ? parseInt(m[1], 16) : null;
+};
+const keeperBeatUs = (e: unknown) => dnCode(e) === 6;
+/** A deploy step the vault refused on purpose, with the SOL already parked: HedgeWorse (13) = the DOWN hedge costs more than it
+ *  covers on this book; PriceSanity (14) = the pool is too far from the market's TWAP. Neither loses anything; the keeper retries. */
+const HELD: Record<number, string> = {
+  13: "Parked, not deployed: on this book the DOWN hedge costs more than it covers, so the vault won't buy the coin without cover. Your SOL waits in the vault as SOL; the keeper deploys it once the hedge is worth buying. Unpark any time.",
+  14: "Parked, not deployed: the pool price is too far from the market's TWAP right now. Your SOL waits in the vault; the keeper retries every ~30 s. Unpark any time.",
+};
+export type Outcome = { sigs: string[]; held: string | null };
+/** A token transfer inside a deploy step came up short (SPL InsufficientFunds, custom 1): the vault's balances moved between
+ *  planning and landing, almost always because the keeper's ~30 s pass deployed the same idle SOL/coin first. */
+const vaultMoved = (e: unknown) => /Token(?:keg|zQd)\w* failed: custom program error: 0x1\b|custom program error: 0x1\b/i.test(errText(e));
 export type Wallet = {
   signAllTransactions?: <T extends VersionedTransaction>(txs: T[]) => Promise<T[]>;
   signTransaction?: <T extends VersionedTransaction>(tx: T) => Promise<T>;
@@ -42,7 +63,13 @@ async function signAll(wallet: Wallet, txs: VersionedTransaction[]) {
   return out;
 }
 
-async function run(steps: Step[], txs: VersionedTransaction[], wallet: Wallet, onStep: (steps: Step[]) => void) {
+async function run(
+  steps: Step[],
+  txs: VersionedTransaction[],
+  wallet: Wallet,
+  onStep: (steps: Step[]) => void,
+  after?: (i: number, e: unknown) => { kind: "keeper" } | { kind: "held"; why: string } | null,
+): Promise<Outcome> {
   const set = (i: number, patch: Partial<Step>) => {
     steps[i] = { ...steps[i], ...patch };
     onStep([...steps]);
@@ -64,12 +91,25 @@ async function run(steps: Step[], txs: VersionedTransaction[], wallet: Wallet, o
       sigs.push(sig);
       set(i, { status: "done", sig });
     } catch (e) {
-      set(i, { status: "failed", error: e instanceof Error ? e.message : "failed" });
+      const o = after?.(i, e) ?? null;
+      // the keeper got there first: what this step and the rest would have done is already done, by the keeper's transaction
+      if (o?.kind === "keeper") {
+        for (let j = i; j < steps.length; j++) set(j, { status: "done", note: j === i ? "the keeper deployed it first" : "done by the keeper" });
+        track("zap_keeper_raced", { step: i });
+        return { sigs, held: null };
+      }
+      // refused for now, nothing lost: this step and the rest wait with the parked SOL
+      if (o?.kind === "held") {
+        for (let j = i; j < steps.length; j++) set(j, { status: "held", note: j === i ? "not now · your SOL stays parked" : "waits with it" });
+        track("zap_deploy_held", { step: i });
+        return { sigs, held: o.why };
+      }
+      set(i, { status: "failed", error: humanError(e) });
       for (let j = i + 1; j < steps.length; j++) set(j, { status: "failed", error: "skipped" });
       throw e;
     }
   }
-  return sigs;
+  return { sigs, held: null };
 }
 
 /** Plan the zap-in first so the UI can show the steps before the wallet opens. */
@@ -88,7 +128,71 @@ export async function zapIn(user: PublicKey, plan: Plan, wallet: Wallet, onStep:
     if (s.signers.length) tx.sign(s.signers.map((k) => Keypair.fromSecretKey(bs58.decode(k))));
     txs.push(tx);
   }
-  return run(steps, txs, wallet, onStep);
+  // step 0 parks; every later step deploys the parked SOL, which the keeper may already have done or the vault may refuse for now
+  return run(steps, txs, wallet, onStep, (i, e) => {
+    if (i === 0) return null;
+    if (keeperBeatUs(e)) return { kind: "keeper" };
+    const c = dnCode(e);
+    if (c !== null && HELD[c]) return { kind: "held", why: HELD[c] };
+    if (vaultMoved(e))
+      return { kind: "held", why: "Parked. The vault's balance moved under this step (the keeper usually deploys idle SOL within ~30 s), so it didn't run as planned. Nothing is lost: your SOL is in the vault and the keeper finishes the deploy on its next pass." };
+    // anything else after the park landed: the SOL is still parked, say that next to the reason
+    return { kind: "held", why: `Parked, not fully deployed: ${humanError(e)}. Your SOL is in the vault; the keeper deploys what's idle on its next pass. Unpark any time.` };
+  });
+}
+
+/** What this wallet holds of a vault's legs: the coin (X), DOWN, WSOL and r-fstacc. */
+type Legs = { x: bigint; down: bigint; wsol: bigint; quote: bigint };
+async function walletLegs(user: PublicKey, view: VaultView): Promise<Legs> {
+  const { v } = view;
+  const bal = async (ata: PublicKey) => {
+    try {
+      return BigInt((await conn.getTokenAccountBalance(ata)).value.amount);
+    } catch {
+      return 0n;
+    }
+  };
+  const [x, down, wsol, quote] = await Promise.all([
+    bal(getAssociatedTokenAddressSync(v.xMint, user, false, v.xProgram)),
+    bal(getAssociatedTokenAddressSync(v.downMint, user, false, TOKEN_2022_PROGRAM_ID)),
+    bal(getAssociatedTokenAddressSync(WSOL, user)),
+    bal(getAssociatedTokenAddressSync(RFSTACC, user)),
+  ]);
+  return { x, down, wsol, quote };
+}
+// The wallet's legs just before an unpark (per vault + wallet), so "leftovers → SOL" sells exactly what unparks withdrew and the
+// second step didn't sell. A hedge leg and a directional bet are the same DOWN mint, and the coin may be the user's own bag:
+// only the delta tells them apart (the same rule the dn/unpark.ts script learnt, see the wiki).
+const snapKey = (view: VaultView, user: PublicKey) => `unpark:${view.v.key.toBase58()}:${user.toBase58()}`;
+function loadSnap(view: VaultView, user: PublicKey): Legs | null {
+  try {
+    const j = JSON.parse(localStorage.getItem(snapKey(view, user)) ?? "null");
+    return j ? { x: BigInt(j.x), down: BigInt(j.down), wsol: BigInt(j.wsol), quote: BigInt(j.quote) } : null;
+  } catch {
+    return null;
+  }
+}
+/** Keeps the EARLIEST snapshot until a finish clears it, so several unparks in a row are all attributed. */
+function saveSnap(view: VaultView, user: PublicKey, l: Legs) {
+  if (loadSnap(view, user)) return;
+  try {
+    localStorage.setItem(snapKey(view, user), JSON.stringify({ x: l.x.toString(), down: l.down.toString(), wsol: l.wsol.toString(), quote: l.quote.toString(), at: Date.now() }));
+  } catch {
+    /* private mode: the finish step then sells nothing it can't attribute */
+  }
+}
+function clearSnap(view: VaultView, user: PublicKey) {
+  try {
+    localStorage.removeItem(snapKey(view, user));
+  } catch {
+    /* nothing to clear */
+  }
+}
+/** What unparks left in the wallet: now − before, never below zero. No record → nothing (never guess). */
+export function unparkLeftovers(before: Legs | null, now: Legs): Legs {
+  if (!before) return { x: 0n, down: 0n, wsol: 0n, quote: 0n };
+  const d = (a: bigint, b: bigint) => (a > b ? a - b : 0n);
+  return { x: d(now.x, before.x), down: d(now.down, before.down), wsol: d(now.wsol, before.wsol), quote: d(now.quote, before.quote) };
 }
 
 /** Everything the withdraw hands over, turned back into SOL: X sold on the pool, WSOL unwrapped, DOWN exited, r-fstacc unstaked. */
@@ -106,6 +210,8 @@ export async function zapOut(user: PublicKey, view: VaultView, shares: bigint, w
 
   const steps: Step[] = [{ label: "Unpark in kind", status: "todo" }, { label: "Turn it all back into SOL", status: "todo" }];
   onStep([...steps]);
+  // what the wallet held before: step 2 sells 98% of the estimate, so the rest (and anything step 2 fails to sell) is attributable later
+  saveSnap(view, user, await walletLegs(user, view));
   const tx1 = await toV0([cu(600_000), ...(await withdrawIxs(user, view, shares))], user);
 
   const back: TransactionInstruction[] = [cu(600_000)];
@@ -157,19 +263,13 @@ const notBudget = (ix: TransactionInstruction) => !ix.programId.equals(ComputeBu
 /** After an unpark that stopped half way (or an in-kind one): turn whatever of this vault's legs sits in the wallet into SOL, from live balances. */
 export async function zapOutFinish(user: PublicKey, view: VaultView, wallet: Wallet, onStep: (steps: Step[]) => void) {
   const { v } = view;
-  const bal = async (ata: PublicKey) => {
-    try {
-      return BigInt((await conn.getTokenAccountBalance(ata)).value.amount);
-    } catch {
-      return 0n;
-    }
-  };
-  const xAta = getAssociatedTokenAddressSync(v.xMint, user, false, v.xProgram);
-  const downAta = getAssociatedTokenAddressSync(v.downMint, user, false, TOKEN_2022_PROGRAM_ID);
   const wsolAta = getAssociatedTokenAddressSync(WSOL, user);
   const quoteAta = getAssociatedTokenAddressSync(RFSTACC, user);
-  const [x, down, wsol, quote] = await Promise.all([bal(xAta), bal(downAta), bal(wsolAta), bal(quoteAta)]);
-  const steps: Step[] = [{ label: "Turn what's in your wallet into SOL", status: "todo" }];
+  // only what this browser's unparks from this vault withdrew and didn't sell: never the wallet's own DOWN bet or coin bag
+  const before = loadSnap(view, user);
+  if (!before) throw new Error("This browser has no record of an unpark from this vault, so it won't sell your coin or DOWN (they may be your own bets). Nothing was sent.");
+  const { x, down, wsol, quote } = unparkLeftovers(before, await walletLegs(user, view));
+  const steps: Step[] = [{ label: "Turn your unpark leftovers into SOL", status: "todo" }];
   onStep([...steps]);
   const pool = await poolState();
   const back: TransactionInstruction[] = [cu(600_000)];
@@ -185,9 +285,14 @@ export async function zapOutFinish(user: PublicKey, view: VaultView, wallet: Wal
     back.push(...(await exitIxs(mv, 1, plan, user, pool)).filter(notBudget));
   }
   if (quote > 1_000n) back.push(withdrawSolIx(pool, user, quoteAta, quote));
-  if (back.length === 1) throw new Error("Nothing from this vault is sitting in your wallet.");
+  if (back.length === 1) {
+    clearSnap(view, user);
+    throw new Error("Nothing from your unparks is left in your wallet.");
+  }
   const tx = await toV0(back, user);
-  return run(steps, [tx], wallet, onStep);
+  const out = await run(steps, [tx], wallet, onStep);
+  clearSnap(view, user);
+  return out;
 }
 
 export const explorerFor = (sig: string) => `https://solscan.io/tx/${sig}`;

@@ -13,9 +13,9 @@ async function fetchSolUsd(): Promise<number> {
   return (await r.json()).solUsd as number;
 }
 
-export function PriceProvider({ children }: { children: ReactNode }) {
+export function PriceProvider({ children, stake = true }: { children: ReactNode; stake?: boolean }) {
   const sol = usePoll(fetchSolUsd, []);
-  const pool = usePoll(poolState, []);
+  const pool = usePoll(() => (stake ? poolState() : Promise.resolve(null)), [stake]);
   // "inverted" flips every oracle price from USD-per-coin to coins-per-quote (USDC/SOL market reads as SOL's price in USDC)
   const [inverted, setInverted] = useState(() => {
     try {

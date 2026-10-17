@@ -26,6 +26,7 @@ import { CardShare } from "../components/Share";
 import { Delta, Flash, Rolling, Sparkline } from "../components/Pulse";
 import { ago, amount as fmtAmount, lev, pct, short, usd, usdPrice } from "../lib/format";
 import { Flex, bust, siteShare } from "../components/Flex";
+import { CatEmpty, CatFilter, useCatRows } from "../components/CatFilter";
 import { HERO_MARKET, MEME_SYMBOL, PUMP_URL, RFSTACC } from "../config";
 
 const SIDE = ["UP", "DOWN"] as const;
@@ -158,6 +159,8 @@ function Bag({ owner, mine }: { owner: PublicKey; mine: boolean }) {
       .sort((a, c) => c.best - a.best);
   }, [b, basis]);
   const agg = useMemo(() => (basis ? aggregatePnl(vals.map((x) => x.pnl)) : null), [vals, basis]);
+  // Memes · Majors · Stonks over the sides list only; the totals above stay the whole bag
+  const { cat, setCat, counts, filtered: shown } = useCatRows(vals, (x) => x.p.v.category);
   const n = vals.length;
   const markets = new Set(vals.map((x) => x.p.v.acct.key.toBase58())).size;
   const curveTotal = vals.reduce((s, x) => s + x.curve, 0);
@@ -297,6 +300,7 @@ function Bag({ owner, mine }: { owner: PublicKey; mine: boolean }) {
         <h2 className="meta">
           <Anchor id="positions" />
           {mine ? "Your sides" : "Their sides"}
+          {n > 0 && <CatFilter cat={cat} onChange={setCat} counts={counts} />}
         </h2>
         {!b ? (
           <span className="skeleton" style={{ height: 120 }} />
@@ -307,9 +311,11 @@ function Bag({ owner, mine }: { owner: PublicKey; mine: boolean }) {
               Pick a side →
             </Link>
           </div>
+        ) : shown.length === 0 && cat ? (
+          <CatEmpty cat={cat} what="in this bag" to={`/?cat=${cat}`} cta="pick a side →" />
         ) : (
           <ol className="cards pos-cards">
-            {vals.map(({ p, units, curve, pot, best, via, pnl }) => (
+            {shown.map(({ p, units, curve, pot, best, via, pnl }) => (
               <PosCard
                 key={p.key}
                 p={p}

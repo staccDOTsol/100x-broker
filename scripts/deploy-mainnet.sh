@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 : "${HOOKED_MEME_MINT:?set HOOKED_MEME_MINT=<memecoin CA>}"
 RPC="${RPC:-https://mainnet.helius-rpc.com/?api-key=f5f1e120-3a60-4e11-a9ed-2b91856e664a}"
 PAYER="${PAYER:-$HOME/hooked.json}"
-PROGRAM=T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb
+PROGRAM=9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6
 
 echo "building with MEME_MINT=$HOOKED_MEME_MINT"
 HOOKED_MEME_MINT="$HOOKED_MEME_MINT" cargo build-sbf --manifest-path programs/hooked/Cargo.toml --force-tools-install=false >/dev/null 2>&1 || HOOKED_MEME_MINT="$HOOKED_MEME_MINT" cargo build-sbf --manifest-path programs/hooked/Cargo.toml

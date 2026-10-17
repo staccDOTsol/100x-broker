@@ -7,8 +7,10 @@ import { readFileSync } from "fs";
 import path from "path";
 import { emptyState, rfstaccRate, scanWinners, type WinState } from "./_lib/winners.js";
 import { emptyRefs, scanRefs, type RefState } from "./_lib/refs.js";
-import { botAddresses } from "./_lib/feed.js";
+import { botAddresses, marketCtx } from "./_lib/feed.js";
 import { memo } from "./_lib/memo.js";
+import { PublicKey } from "@solana/web3.js";
+import type { Category } from "../src/lib/category.js";
 
 // 15 s fresh; for 10 min after that the last scan is served at once while the next one runs in the background. The first
 // scan of an instance (baseline file + what landed since) is the only one a request ever waits for.
@@ -110,9 +112,21 @@ function race(rows: Row[], now: number, scanned: number) {
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const [st, rate, rst, bots] = await Promise.all([state(), rfstaccRate(), refState(), botAddresses()]);
+    // Memes · Majors · Stonks per win, from the market's underlying coin (api/_lib/feed.ts marketCtx, memoized a day); a market that
+    // will not resolve right now stays `other` rather than holding the leaderboard
+    const cats = new Map<string, Category>();
+    await Promise.all(
+      [...new Set(st.wins.map((w) => w.market))].map(async (m) => {
+        try {
+          cats.set(m, (await Promise.race([marketCtx(new PublicKey(m)), new Promise<null>((r) => setTimeout(() => r(null), 4_000))]))?.category ?? "other");
+        } catch {
+          cats.set(m, "other");
+        }
+      }),
+    );
     const wins = st.wins.map((w) => {
       const f = w.unit === "rfstacc" ? rate : 1;
-      return { ...w, cost_sol: w.cost * f, out_sol: w.out * f, gain_sol: w.gain * f, per_hour_sol: w.hold_s > 0 ? (w.gain * f) / (w.hold_s / 3600) : null };
+      return { ...w, category: cats.get(w.market) ?? "other", cost_sol: w.cost * f, out_sol: w.out * f, gain_sol: w.gain * f, per_hour_sol: w.hold_s > 0 ? (w.gain * f) / (w.hold_s / 3600) : null };
     });
     const total = wins.reduce((a, w) => a + w.gain_sol, 0);
     const losses = (st.losses ?? []).map((w) => ({ ...w, gain_sol: w.gain * (w.unit === "rfstacc" ? rate : 1) }));

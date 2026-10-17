@@ -5,21 +5,22 @@ import { Connection, PublicKey, type ParsedInstruction, type ParsedTransactionWi
 import bs58 from "bs58";
 import { memo } from "./_lib/memo.js";
 import { parsedTxs, recentSigs } from "./_lib/txcache.js";
+import { serverConnection } from "../src/lib/upstream.js";
 
-const DN_PROGRAM = "2ZbjE44nSh3AmpREg4sdNMViBLAzAEtFKYDn1XdqMzEj";
+const DN_PROGRAM = "63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU";
 const VAULT_LEN = 488;
 /** Inner programs the keeper is allowed to forward through `act`, by the name the feed calls them. */
 const TARGETS: Record<string, string> = {
   CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK: "Raydium",
   dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN: "DBC hedge",
-  T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb: "redeem",
+  "9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6": "redeem",
   SP12tWFxD9oJsVWNavTTBZvMbA6gkAmxtVgxdqvyvhY: "stake pool",
 };
 
 const conn = () => {
   const u = process.env.HELIUS_RPC_URL;
   if (!u) throw new Error("HELIUS_RPC_URL not configured");
-  return new Connection(u, "confirmed");
+  return serverConnection();
 };
 
 export type DnEv = {

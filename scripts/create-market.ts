@@ -13,7 +13,8 @@ import { PROGRAM_ID, RFSTACC, createMarketIx, cu, marketPda, send, sideAccounts,
 
 const RPC = process.env.RPC ?? "http://127.0.0.1:8899";
 const ORACLE_POOL = new PublicKey(process.env.ORACLE_POOL ?? "45ssPkUQs1ssbeDqxD2mZrMdJYAXF7GyQyhS5xDXuWC5");
-const WINDOW = Number(process.env.WINDOW_SECS ?? 3960);
+// 1 s = 2-observation TWAP (the window starts at the previous stored point): enough to defeat a same-transaction push
+const WINDOW = Number(process.env.WINDOW_SECS ?? 1);
 const SITE = process.env.SITE ?? "https://100x.broker";
 const RAYDIUM_CLMM = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
 const WSOL = new PublicKey("So11111111111111111111111111111111111111112");
@@ -40,8 +41,19 @@ if (!poolInfo || !poolInfo.owner.equals(RAYDIUM_CLMM)) throw new Error("ORACLE_P
 const mint0 = new PublicKey(poolInfo.data.subarray(73, 105));
 const mint1 = new PublicKey(poolInfo.data.subarray(105, 137));
 const obs = new PublicKey(poolInfo.data.subarray(201, 233));
-const underlyingIsToken0 = mint0.equals(WSOL) ? 0 : 1; // the non-SOL side is the underlying
+// A ring that has stored nothing for RING_STALE_SECS puts the market in sampling mode, where the end point is the pool's live
+// tick: a short window there is spot price. Raydium ring: 100 × 44-byte observations from byte 51, block_timestamp u32 first.
+if (WINDOW < 600) {
+  const ring = (await conn.getAccountInfo(obs))?.data;
+  let newest = 0;
+  for (let i = 0; ring && i < 100; i++) newest = Math.max(newest, ring.readUInt32LE(51 + i * 44));
+  const age = Math.floor(Date.now() / 1000) - newest;
+  if (!newest || age > 3600) throw new Error(`oracle ring ${obs.toBase58()} is dead (newest observation ${newest ? `${age} s` : "never"} old): the market would sample spot, so WINDOW_SECS must be ≥ 600 on this pool`);
+}
+// the non-SOL side is the underlying, unless UNDERLYING=<mint> names the other one (a SOL market on the SOL/USDC pool)
+const underlyingIsToken0 = process.env.UNDERLYING ? (mint0.toBase58() === process.env.UNDERLYING ? 1 : 0) : mint0.equals(WSOL) ? 0 : 1;
 const underlying = underlyingIsToken0 ? mint0 : mint1;
+if (process.env.UNDERLYING && underlying.toBase58() !== process.env.UNDERLYING) throw new Error("UNDERLYING is not one of the pool's two mints");
 
 // names/symbols come from the underlying's DAS record — identical to app/api/_lib/das.ts
 const DAS_RPC = process.env.DAS_RPC ?? (RPC.includes("helius") ? RPC : "https://mainnet.helius-rpc.com/?api-key=f5f1e120-3a60-4e11-a9ed-2b91856e664a");

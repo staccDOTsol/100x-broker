@@ -3,13 +3,14 @@
 // Incremental per instance: the first pass scans the launch's history back to SINCE, later passes fetch only what landed
 // after the newest signature already tallied (`until`); 15 s fresh, a minute stale.
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { Connection, PublicKey, type ParsedTransactionWithMeta, type PartiallyDecodedInstruction } from "@solana/web3.js";
+import { PublicKey, type ParsedTransactionWithMeta, type PartiallyDecodedInstruction } from "@solana/web3.js";
 import bs58 from "bs58";
 import { memo } from "./_lib/memo.js";
+import { serverConnection } from "../src/lib/upstream.js";
 
 const LAUNCH = new PublicKey("6wot8WTk5WGoUQrSbFaTzMasUutYBfQDG3pNan3LG9sU");
 const LAUNCH_PROGRAM = "moontUzsdepotRGe5xsfip7vLPTJnVuafqdUWexVnPM";
-const OURS = process.env.VITE_PROGRAM_ID ?? "T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb";
+const OURS = process.env.VITE_PROGRAM_ID ?? "9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6";
 const MEMO = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 const MEMO_TAG = "100x.broker 0/20";
 const JUP = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
@@ -36,7 +37,7 @@ type Tally = { newest?: string; usdc: bigint; txs: number; backers: Set<string>;
 async function scan(prev: Tally | undefined): Promise<Tally> {
   const u = process.env.HELIUS_RPC_URL;
   if (!u) throw new Error("HELIUS_RPC_URL not configured");
-  const c = new Connection(u, "confirmed");
+  const c = serverConnection();
   const st: Tally = prev ? { ...prev, backers: new Set(prev.backers), pending: [] } : { usdc: 0n, txs: 0, backers: new Set(), pending: [] };
   const sigs: string[] = [...(prev?.pending ?? [])]; // transactions the RPC had not indexed on the last pass
   let before: string | undefined;

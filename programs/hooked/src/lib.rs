@@ -4,6 +4,9 @@
 pub mod consts;
 pub mod cpi;
 pub mod error;
+pub mod launch;
+#[cfg(test)]
+mod launch_fixtures;
 pub mod math;
 pub mod oracle;
 pub mod processor;

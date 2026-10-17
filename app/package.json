@@ -12,6 +12,7 @@
   "dependencies": {
     "@meteora-ag/dynamic-bonding-curve-sdk": "1.5.13",
     "@noble/curves": "1.9.7",
+    "@pump-fun/pump-sdk": "^4.0.0",
     "@raydium-io/raydium-sdk-v2": "0.2.74-alpha",
     "@resvg/resvg-js": "2.6.2",
     "@solana/spl-token": "0.4.15",

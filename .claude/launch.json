@@ -4,7 +4,23 @@
     {
       "name": "app-fork",
       "runtimeExecutable": "bun",
-      "runtimeArgs": ["run", "--cwd", "app", "dev:fork"],
+      "runtimeArgs": [
+        "run",
+        "--cwd",
+        "app",
+        "dev:fork"
+      ],
+      "port": 5173
+    },
+    {
+      "name": "app",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": [
+        "run",
+        "--cwd",
+        "app",
+        "dev"
+      ],
       "port": 5173
     }
   ]

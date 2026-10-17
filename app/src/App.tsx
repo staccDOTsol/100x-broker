@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { NavLink, Route, Routes, Link, useLocation } from "react-router-dom";
+import { NavLink, Navigate, Route, Routes, Link, useLocation } from "react-router-dom";
 import { captureRef } from "./lib/ref";
 import { ConnectionProvider, WalletProvider, useWallet } from "@solana/wallet-adapter-react";
 import { ToastProvider, useToasts, type Toast } from "./components/Toasts";
 import { PriceProvider, usePrices } from "./hooks/price";
 import { WalletButton } from "./components/bits";
 import { CopyCA } from "./components/Coin";
+import { carriedCat, withCat } from "./components/CatFilter";
 import { Tape } from "./components/Live";
 import { Flash, useNow } from "./components/Pulse";
 import { BurnerWalletAdapter } from "./lib/burner";
@@ -15,13 +16,19 @@ import { short, usd } from "./lib/format";
 import Board from "./pages/Board";
 import MarketPage from "./pages/MarketPage";
 import NewMarket from "./pages/NewMarket";
+import Launch from "./pages/Launch";
 import PortfolioPage from "./pages/Portfolio";
-import YieldPage from "./pages/Yield";
-import VaultPage from "./pages/VaultPage";
+import VaultRedirect from "./pages/VaultRedirect";
 import MetaPage from "./pages/Meta";
 import ArenaPage from "./pages/Arena";
 import WinnersPage from "./pages/Winners";
-import { NETWORK, RPC_URL } from "./config";
+import SwapPage from "./pages/Swap";
+import SwapBagPage from "./pages/SwapBag";
+import WrapPage from "./pages/Wrap";
+import WarPage, { NewWarPage, WarLobby, WatchPage } from "./pages/War";
+import WarAction from "./pages/WarAction";
+import { HERO_MARKET, NETWORK, RPC_URL } from "./config";
+import { Icon } from "./components/Icons";
 
 type Theme = "auto" | "light" | "dark";
 function useTheme(): [Theme, () => void] {
@@ -170,71 +177,174 @@ function LiveToasts() {
   return null;
 }
 
+const LAST_MARKET = "lastMarket";
+const lastMarket = () => {
+  try {
+    return localStorage.getItem(LAST_MARKET) ?? HERO_MARKET;
+  } catch {
+    return HERO_MARKET;
+  }
+};
+
+/** The slim side rail: every section as an icon (labels show on hover and on narrow screens, where it becomes a scroll row). */
+function RailNav({ cat, trade }: { cat: ReturnType<typeof carriedCat>; trade: string }) {
+  const loc = useLocation();
+  const items: { to: string; label: string; icon: () => JSX.Element; end?: boolean; on?: boolean }[] = [
+    { to: withCat("/", cat), label: "Markets", icon: Icon.markets, end: true },
+    { to: trade, label: "Trade", icon: Icon.trade, on: loc.pathname.startsWith("/m/") },
+    { to: withCat("/new", cat), label: "New market", icon: Icon.plus },
+    { to: "/launch", label: "Launch", icon: Icon.launch },
+    { to: withCat("/me", cat), label: "Bag", icon: Icon.bag },
+    { to: "/meta", label: "Spicy", icon: Icon.spicy },
+    { to: "/wrap", label: "Wrap", icon: Icon.wrap },
+    { to: withCat("/arena", cat), label: "Arena", icon: Icon.arena },
+    { to: withCat("/winners", cat), label: "Leaderboard", icon: Icon.trophy },
+  ];
+  return (
+    <nav className="side-rail" aria-label="Sections">
+      {items.map((it) => (
+        <NavLink
+          key={it.label}
+          to={it.to}
+          end={it.end}
+          className={({ isActive }) => (isActive || it.on ? "active" : "")}
+          aria-current={it.on ? "page" : undefined}
+          title={it.label}
+        >
+          <it.icon />
+          <span>{it.label}</span>
+        </NavLink>
+      ))}
+    </nav>
+  );
+}
+
 const ENDPOINTS = ["/api", "/api/winners", "/api/feed", "/api/markets", "/api/leaders", "/api/arena", "/api/price", "/api/meta"];
 
 export default function App() {
   const [theme, cycle] = useTheme();
   const loc = useLocation();
   useEffect(() => captureRef(loc.search), [loc.search]);
+  // "Trade" in the nav reopens the last market that loaded (MarketPage writes it), the hero market before that
+  const last = lastMarket();
+  const trade = last ? `/m/${last}` : "/";
+  // Memes · Majors · Stonks rides along the list pages' nav links (this page's `cat`, else the remembered one)
+  const cat = carriedCat(loc.search);
+  // lastbidwins.fun: the Stars War host — the same app, the war at "/", the swap-style bare masthead
+  const onWar = typeof window !== "undefined" && /(^|\.)lastbidwins\.fun$/.test(window.location.hostname);
+  const onSwap = onWar || (typeof window !== "undefined" && window.location.hostname.split(".")[0] === "swap");
+  // ?embed=1: the swap widget inside someone else's page (public/widget.js) — the card and the wallet, no tape, no masthead
+  const embed = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("embed") === "1";
   // wallet-standard finds installed extensions on its own; the burner is the one wallet the site ships
   const wallets = useMemo(() => [new BurnerWalletAdapter()], []);
   return (
     <ConnectionProvider endpoint={RPC_URL} config={{ commitment: "confirmed" }}>
+      {/* autoConnect: the provider connects a wallet the user picks (and reconnects the last one). Removing it left
+          Phantom spinning: the custom connect fired before the provider listened. */}
       <WalletProvider wallets={wallets} autoConnect>
         <ToastProvider>
           <PriceProvider>
-            <Tape />
-            <div className="shell">
+            {/* the main site is a trading terminal now: live trades float on the charts and fill the trade tables, so no tape on top */}
+            {onSwap && !embed && loc.pathname !== "/a" && loc.pathname !== "/play" && !loc.pathname.startsWith("/play/") && <Tape />}
+            {!onSwap && !embed && <RailNav cat={cat} trade={trade} />}
+            <div className={loc.pathname === "/a" ? "shell war-bare" : embed ? "shell swap-shell swap-embed" : onSwap ? "shell swap-shell" : "shell term"}>
+              {onWar && <p className="not-gambling">it's not gambling; the winner is well-known at all times, there is no rng</p>}
               <header className="masthead">
-                <Link to="/" className="wordmark" aria-label="100x.broker home">
-                  <b>100x</b>
-                  <i>.broker</i>
-                </Link>
-                <div className="dateline">
-                  <Pills />
-                  {NETWORK === "fork" && (
-                    <span className="netbadge" data-net="fork">
-                      local fork
-                    </span>
+                {onWar ? (
+                  <Link to="/" className="wordmark" aria-label="lastbidwins.fun">
+                    <b>lastbidwins</b>
+                    <i>.fun</i>
+                  </Link>
+                ) : onSwap ? (
+                  <a href="https://100x.broker" className="wordmark" aria-label="100x.broker">
+                    <b>swap</b>
+                  </a>
+                ) : (
+                  <Link to="/" className="wordmark" aria-label="100x.broker home">
+                    <b>100x</b>
+                    <i>.broker</i>
+                  </Link>
+                )}
+                {!onSwap && (
+                  <div className="dateline">
+                    <Pills />
+                    {NETWORK === "fork" && (
+                      <span className="netbadge" data-net="fork">
+                        local fork
+                      </span>
+                    )}
+                  </div>
+                )}
+                <div className="nav">
+                  {onWar ? (
+                    <>
+                      <NavLink to="/" end className="swap-nav">
+                        Gold run
+                      </NavLink>
+                      <NavLink to="/w" end className="swap-nav">
+                        All wars
+                      </NavLink>
+                      <WalletButton solo />
+                    </>
+                  ) : onSwap || embed ? (
+                    <>
+                      <NavLink to={`/${loc.search}`} end className="swap-nav">
+                        Swap
+                      </NavLink>
+                      <NavLink to={`/bag${loc.search}`} className="swap-nav swap-nav-bag">
+                        Bag
+                      </NavLink>
+                      <WalletButton solo />
+                    </>
+                  ) : (
+                    <>
+                      <span className="top-tabs">
+                        <NavLink to={withCat("/", cat)} end>
+                          Markets
+                        </NavLink>
+                        <NavLink to={trade} className={loc.pathname.startsWith("/m/") ? "active" : undefined} aria-current={loc.pathname.startsWith("/m/") ? "page" : undefined}>
+                          Trade
+                        </NavLink>
+                        <NavLink to={withCat("/winners", cat)} className="nav-winners">
+                          Leaderboard
+                        </NavLink>
+                      </span>
+                      <NavLink to={withCat("/new", cat)} className="btn signal small spawn" title="Anyone can list a market on any coin">
+                        + New<span className="hide-xs">{"\u00a0"}market</span>
+                      </NavLink>
+                      <CopyCA small />
+                      <button className="theme" onClick={cycle} aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`}>
+                        {theme === "auto" ? "◐" : theme === "light" ? "☼" : "☾"}
+                      </button>
+                      <WalletButton />
+                    </>
                   )}
                 </div>
-                <div className="nav">
-                  <NavLink to="/" end>
-                    Board
-                  </NavLink>
-                  <NavLink to="/new">List</NavLink>
-                  <NavLink to="/me">Bag</NavLink>
-                  <NavLink to="/yield" className="nav-yield">
-                    Yield
-                  </NavLink>
-                  <NavLink to="/meta">spicy</NavLink>
-                  <NavLink to="/arena">arena</NavLink>
-                  <NavLink to="/winners" className="nav-winners">
-                    leaderboard
-                  </NavLink>
-                  <CopyCA small />
-                  <button className="theme" onClick={cycle} aria-label={`Theme: ${theme}`} title={`Theme: ${theme}`}>
-                    {theme === "auto" ? "◐" : theme === "light" ? "☼" : "☾"}
-                  </button>
-                  <WalletButton />
-                </div>
               </header>
-              <div className="crumb meta">
-                <span>100x.broker{loc.pathname === "/" ? "" : loc.pathname}</span>
-                <span>Up or down · no liquidations · settles in SOL</span>
-              </div>
               <main>
                 <Routes>
-                  <Route path="/" element={<Board />} />
+                  <Route path="/" element={onWar ? <WarPage /> : onSwap || embed ? <SwapPage /> : <Board />} />
+                  <Route path="/a" element={<WarAction />} />
+                  <Route path="/w" element={<WarLobby />} />
+                  <Route path="/w/new" element={<NewWarPage />} />
+                  <Route path="/w/:id" element={<WarPage />} />
+                  <Route path="/play" element={<WatchPage />} />
+                  <Route path="/play/:mint" element={<WatchPage />} />
+                  <Route path="/swap" element={<SwapPage />} />
+                  <Route path="/bag" element={<SwapBagPage />} />
                   <Route path="/m/:key" element={<MarketPage />} />
                   <Route path="/new" element={<NewMarket />} />
+                  <Route path="/launch" element={<Launch />} />
                   <Route path="/me" element={<PortfolioPage />} />
                   <Route path="/p/:wallet" element={<PortfolioPage />} />
-                  <Route path="/yield" element={<YieldPage />} />
-                  <Route path="/yield/:vault" element={<VaultPage />} />
+                  {/* yield lives on the market pages now (?side=yield); the old routes bounce there */}
+                  <Route path="/yield" element={<Navigate to={{ pathname: "/", search: loc.search }} replace />} />
+                  <Route path="/yield/:vault" element={<VaultRedirect />} />
                   <Route path="/meta" element={<MetaPage />} />
                   <Route path="/arena" element={<ArenaPage />} />
                   <Route path="/winners" element={<WinnersPage />} />
+                  <Route path="/wrap" element={<WrapPage />} />
+                  <Route path="/wrap/:mint" element={<WrapPage />} />
                   <Route
                     path="*"
                     element={
@@ -249,16 +359,18 @@ export default function App() {
                   />
                 </Routes>
               </main>
-              <footer className="agents">
-                <span>Agents · every board is JSON:</span>
-                {ENDPOINTS.map((e) => (
-                  <a key={e} href={e}>
-                    {e}
-                  </a>
-                ))}
-                <a href="/cli/README.md">/cli</a>
-                <a href="/cli/NASH.md">/cli/nash</a>
-              </footer>
+              {!onSwap && (
+                <footer className="agents">
+                  <span>Agents · every board is JSON:</span>
+                  {ENDPOINTS.map((e) => (
+                    <a key={e} href={e}>
+                      {e}
+                    </a>
+                  ))}
+                  <a href="/cli/README.md">/cli</a>
+                  <a href="/cli/NASH.md">/cli/nash</a>
+                </footer>
+              )}
             </div>
             <LiveToasts />
           </PriceProvider>
