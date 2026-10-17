@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction } from "@solana/spl-token";
-import { conn, dbc, marketsForOracle, oracleHealth, sendRaw, type OracleHealth } from "../lib/chain";
+import { TWO_OBS_WINDOW_SECS, conn, dbc, defaultWindowSecs, marketsForOracle, oracleHealth, sendRaw, twoObsSafe, withPendingConfig, type OracleHealth } from "../lib/chain";
 import { createMarketIx, cu, marketPda, sideAccounts, type MarketKeys } from "../lib/hooked";
 import { VENUE_LABEL, candidateEffectiveQuote, candidateMove1PctQuote, candidateMove1PctUsd, candidateTvlUsd, decodeVenuePool, discoverPools, patchPoolVolumes, poolsMissingVolume, quoteSymbolOf, type PoolCandidate, type PoolVol } from "../lib/venues";
 import { marketCurve } from "../lib/curve";
@@ -28,11 +28,19 @@ const usdRound = (x: number | null) => (x === null ? "—" : `$${x.toLocaleStrin
 type StepState = "idle" | "active" | "done" | "failed";
 // Same four on-chain steps, same order; labels are display-only.
 const STEPS = ["Curve config", "UP curve", "DOWN curve", "Market + vaults"];
+// "default" is marked per pool: 2 obs on a live Raydium ring, 66 min where the program samples the pool itself
 const WINDOWS = [
+  { secs: TWO_OBS_WINDOW_SECS, label: "2 obs", note: "live ring only" },
   { secs: 900, label: "15 min", note: "fast" },
-  { secs: DEFAULT_WINDOW_SECS, label: "66 min", note: "default" },
+  { secs: DEFAULT_WINDOW_SECS, label: "66 min", note: "sampled pools" },
   { secs: 14_400, label: "4 h", note: "calm" },
 ];
+/** `?window=` is minutes, or "2obs" for the 1 s window. */
+const windowFromParam = (v: string | null) => {
+  if (v === "2obs") return TWO_OBS_WINDOW_SECS;
+  const m = Number(v);
+  return v !== null && Number.isFinite(m) && m > 0 ? Math.round(m * 60) : null;
+};
 const EST_RENT_SOL = 0.04;
 /** Mirrors `marketCurve()` in lib/curve.ts (startingFeeBps = endingFeeBps = 400). */
 const CURVE_FEE_BPS = 400;
@@ -67,7 +75,23 @@ function loadOrMakeKeys(id: string) {
   } catch {
     /* fall through */
   }
-  const k = { bull: Keypair.generate(), bear: Keypair.generate(), config: Keypair.generate() };
+  return null;
+}
+/** Fresh keys: the two mints come from the 1oox vanity stockpile (/api/vanity), the curve config is any keypair. */
+async function makeKeys(id: string) {
+  let bull = Keypair.generate();
+  let bear = Keypair.generate();
+  try {
+    const r = await fetch("/api/vanity?n=2", { method: "POST" });
+    if (r.ok) {
+      const j = (await r.json()) as { keys?: { secret: number[] }[] };
+      const ks = (j.keys ?? []).map((k) => Keypair.fromSecretKey(Uint8Array.from(k.secret)));
+      if (ks.length === 2) [bull, bear] = ks;
+    }
+  } catch {
+    /* grinder unreachable: plain keys, listing still works */
+  }
+  const k = { bull, bear, config: Keypair.generate() };
   try {
     localStorage.setItem(keyStore(id), JSON.stringify({ bull: [...k.bull.secretKey], bear: [...k.bear.secretKey], config: [...k.config.secretKey] }));
   } catch {
@@ -75,6 +99,7 @@ function loadOrMakeKeys(id: string) {
   }
   return { ...k, resumed: false };
 }
+type Keys = NonNullable<ReturnType<typeof loadOrMakeKeys>> | Awaited<ReturnType<typeof makeKeys>>;
 
 export default function NewMarket() {
   const { publicKey, signAllTransactions } = useWallet();
@@ -86,23 +111,24 @@ export default function NewMarket() {
   const setInput = (v: string) => {
     setInputRaw(v);
     q.set({ mint: v.trim() || null, pool: null, window: null });
+    // a new coin means a new pool, whose default window may differ (2 obs needs a live ring)
+    setWindowPick(null);
+    setCustomWin("");
   };
   const [resolving, setResolving] = useState(false);
   const [inputErr, setInputErr] = useState<string | null>(null);
   const [under, setUnder] = useState<Underlying | null>(null);
   const [pools, setPools] = useState<PoolRow[]>([]);
   const [poolIdx, setPoolIdx] = useState(0);
-  const [windowSecs, setWindowSecsRaw] = useState(() => {
-    const m = Number(q.get("window"));
-    return Number.isFinite(m) && m > 0 ? Math.round(m * 60) : DEFAULT_WINDOW_SECS;
-  });
+  // null = the selected pool's default (defaultWindowSecs); a chip or the custom box pins a window
+  const [windowPick, setWindowPick] = useState<number | null>(() => windowFromParam(q.get("window")));
   const setWindowSecs = (secs: number) => {
-    setWindowSecsRaw(secs);
-    q.set({ window: secs === DEFAULT_WINDOW_SECS ? null : secs / 60 });
+    setWindowPick(secs);
+    q.set({ window: secs === TWO_OBS_WINDOW_SECS ? "2obs" : secs / 60 });
   };
   const [customWin, setCustomWin] = useState(() => {
-    const m = Number(q.get("window"));
-    return Number.isFinite(m) && m > 0 && !WINDOWS.some((w) => w.secs === Math.round(m * 60)) ? String(m) : "";
+    const secs = windowFromParam(q.get("window"));
+    return secs !== null && !WINDOWS.some((w) => w.secs === secs) ? String(secs / 60) : "";
   });
   const [meta, setMeta] = useState<{ up: DerivedMeta; down: DerivedMeta } | null>(null);
   const [existing, setExisting] = useState<PublicKey[]>([]);
@@ -178,6 +204,9 @@ export default function NewMarket() {
   }, [input]);
 
   const pool = pools[poolIdx] ?? null;
+  const twoObsOk = !!pool && twoObsSafe(pool.venue, pool.health);
+  const poolDefaultWindow = pool ? defaultWindowSecs(pool.venue, pool.health) : DEFAULT_WINDOW_SECS;
+  const windowSecs = windowPick ?? poolDefaultWindow;
   const underlyingMint = under ? new PublicKey(under.mint) : null;
 
   // 2. derived names/images for the pair + existing markets on this oracle
@@ -195,9 +224,28 @@ export default function NewMarket() {
   }, [underlyingMint?.toBase58(), pool?.slotObs.toBase58()]);
 
   const flag = pool && underlyingMint ? (pool.mint0.equals(underlyingMint) ? 1 : 0) : 0;
-  const windowOk = windowSecs >= 60 && windowSecs <= 86_400;
+  // short windows are spot price wherever the program samples the pool's live tick (dead ring, PumpSwap, CPMM, Meteora)
+  const windowOk = (twoObsOk ? windowSecs >= TWO_OBS_WINDOW_SECS : windowSecs >= 60) && windowSecs <= 86_400;
   // the market PDA (and the resume key) commit to the oracle_obs slot: the CLMM ring, the PumpSwap base ATA, the CPMM token-0 vault, the Meteora pool
-  const kp = useMemo(() => (pool ? loadOrMakeKeys(`${pool.slotObs.toBase58()}:${windowSecs}`) : null), [pool?.slotObs.toBase58(), windowSecs]);
+  const [kp, setKp] = useState<Keys | null>(null);
+  useEffect(() => {
+    if (!pool) {
+      setKp(null);
+      return;
+    }
+    const id = `${pool.slotObs.toBase58()}:${windowSecs}`;
+    const stored = loadOrMakeKeys(id);
+    if (stored) {
+      setKp(stored);
+      return;
+    }
+    let alive = true;
+    setKp(null);
+    makeKeys(id).then((k) => alive && setKp(k));
+    return () => {
+      alive = false;
+    };
+  }, [pool?.slotObs.toBase58(), windowSecs]);
   const keys: MarketKeys | null = useMemo(() => {
     if (!pool || !kp || !windowOk) return null;
     return {
@@ -238,10 +286,13 @@ export default function NewMarket() {
           continue;
         }
         const d = meta[side];
-        const tx = await dbc.creator.createPoolWithTransferHook({
-          name: d.name, symbol: d.symbol, uri: metaUri(um, side), payer, poolCreator: payer,
-          config: kp.config.publicKey, baseMint: mint.publicKey, transferHookProgram: PROGRAM_ID,
-        });
+        // the config is usually in this same batch, not on chain yet
+        const tx = await withPendingConfig(kp.config.publicKey, () =>
+          dbc.creator.createPoolWithTransferHook({
+            name: d.name, symbol: d.symbol, uri: metaUri(um, side), payer, poolCreator: payer,
+            config: kp.config.publicKey, baseMint: mint.publicKey, transferHookProgram: PROGRAM_ID,
+          }),
+        );
         plan.push({ i, tx, signers: [mint] });
       }
       if (!exists[3]) {
@@ -420,12 +471,14 @@ export default function NewMarket() {
                     className="chip"
                     role="radio"
                     aria-checked={windowSecs === w.secs && customWin === ""}
+                    disabled={w.secs === TWO_OBS_WINDOW_SECS && !twoObsOk}
+                    title={w.secs === TWO_OBS_WINDOW_SECS && !twoObsOk ? "This pool keeps no live price history the market can read, so 2 obs would be spot price" : undefined}
                     onClick={() => {
                       setCustomWin("");
                       setWindowSecs(w.secs);
                     }}
                   >
-                    {w.label} <span className="muted">· {w.note}</span>
+                    {w.label} <span className="muted">· {w.secs === poolDefaultWindow ? "default" : w.note}</span>
                   </button>
                 ))}
                 <span className="chips-right">

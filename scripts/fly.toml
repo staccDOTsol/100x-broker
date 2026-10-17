@@ -4,7 +4,7 @@ primary_region = "iad"
 [build]
 
 [env]
-  DN_PROGRAM_ID = "2ZbjE44nSh3AmpREg4sdNMViBLAzAEtFKYDn1XdqMzEj"
+  DN_PROGRAM_ID = "63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU"
   LOOP_MS = "30000"
   MEME_MINT = "Fr28jEWz2msSCKLaHzus2nCKrwqbpTx2EyDYtsVVpump"
   MIN_BURN_LST = "50000"

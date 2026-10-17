@@ -14,7 +14,7 @@ import {
   deriveDbcPoolAuthority,
   deriveDbcTokenVaultAddress,
 } from "@meteora-ag/dynamic-bonding-curve-sdk";
-import { DBC, PROGRAM_ID, RFSTACC } from "../config.js";
+import { DBC, MEME_MINT, PROGRAM_ID, RFSTACC } from "../config.js";
 export const DEV_ATA = new PublicKey("6Jrrws5TmFTb4eCa63A4yNnaSCC62yvvHYspK3KW4SEd");
 export const PUMP = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
 export const PUMPSWAP = new PublicKey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
@@ -213,3 +213,104 @@ export function burnMemeIx(caller: PublicKey, mint: PublicKey, memeProgram: Publ
 }
 
 export const cu = (units: number) => ComputeBudgetProgram.setComputeUnitLimit({ units });
+
+// ---------- launches: a market's companion pump.fun coins ($TICKERUP / $TICKERDN, quoted in $100XBRO) ----------
+/** `register_launch` tag. */
+export const TAG_REGISTER_LAUNCH = 8;
+/** `boost` tag. */
+export const TAG_BOOST = 9;
+/** Launch.mode 0: Launch PDA is a 9000 bps shareholder next to the lister's 1000. boost burns 1/9 and sells 8/9. */
+export const LAUNCH_MODE_SHARED = 0;
+/** Launch.mode 1: Launch PDA receives 100%; boost pays the lister 10%, burns 10%, sells 80%. */
+export const LAUNCH_MODE_FULL = 1;
+/** Same value as LAUNCH_MODE_FULL. */
+export const LAUNCH_MODE_SOLE = LAUNCH_MODE_FULL;
+/** Fee split a launch advertises: pump's 3% creator fee → 80% side vault · 10% lister · 10% burn. */
+export const LAUNCH_CREATOR_FEE_BPS = 300;
+export const LAUNCH_SPLIT = { vault: 80, lister: 10, burn: 10 } as const;
+/** On-chain `Launch` (state.rs): 144 bytes, disc `hooklnch`. `curve` is derived, not stored. */
+export const LAUNCH_LAYOUT = { len: 144, disc: 0, market: 8, mint: 40, lister: 72, side: 104, mode: 105, bump: 106, solBump: 107, totalSold: 112, totalBurned: 120, totalLister: 128, totalBoost: 136 } as const;
+const LAUNCH_DISC = Buffer.from("hooklnch");
+
+export type Launch = {
+  key: PublicKey;
+  market: PublicKey;
+  mint: PublicKey;
+  /** Bonding-curve PDA of `mint`. Not a field on the account. */
+  curve: PublicKey;
+  lister: PublicKey;
+  side: 0 | 1;
+  mode: number;
+  bump: number;
+  solBump: number;
+  totalSold: bigint;
+  totalBurned: bigint;
+  totalLister: bigint;
+  totalBoost: bigint;
+};
+
+/** ["launch", market, side u8] under our program. */
+export const launchPda = (market: PublicKey, side: 0 | 1) =>
+  PublicKey.findProgramAddressSync([Buffer.from("launch"), market.toBuffer(), Buffer.from([side])], PROGRAM_ID)[0];
+/** ["launch-sol", market, side u8], data-less and system-owned. Holds unwrapped SOL inside boost. */
+export const launchSolPda = (market: PublicKey, side: 0 | 1) =>
+  PublicKey.findProgramAddressSync([Buffer.from("launch-sol"), market.toBuffer(), Buffer.from([side])], PROGRAM_ID)[0];
+/** pump's BondingCurve PDA for a coin. */
+export const pumpCurvePda = (mint: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("bonding-curve"), mint.toBuffer()], PUMP)[0];
+export const PUMP_FEES = new PublicKey("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
+export const sharingConfigPda = (mint: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from("sharing-config"), mint.toBuffer()], PUMP_FEES)[0];
+const STAKE_POOL_PROGRAM = new PublicKey("SP12tWFxD9oJsVWNavTTBZvMbA6gkAmxtVgxdqvyvhY");
+/** PumpSwap sell_v2 fee_config second seed (idl/pump_amm.json), under PUMP_FEES. */
+const PS_FEE_CONFIG_SEED = Buffer.from([12, 20, 222, 252, 130, 94, 198, 118, 148, 37, 8, 24, 187, 101, 64, 101, 244, 41, 141, 49, 86, 213, 113, 180, 212, 248, 9, 12, 24, 233, 168, 99]);
+
+export function decodeLaunch(key: PublicKey, d: Uint8Array): Launch | null {
+  if (d.length !== LAUNCH_LAYOUT.len) return null;
+  const b = Buffer.from(d);
+  if (!b.subarray(0, 8).equals(LAUNCH_DISC)) return null;
+  const side = b[LAUNCH_LAYOUT.side];
+  if (side !== 0 && side !== 1) return null;
+  const pk = (o: number) => new PublicKey(b.subarray(o, o + 32));
+  const mint = pk(LAUNCH_LAYOUT.mint);
+  return {
+    key, market: pk(LAUNCH_LAYOUT.market), mint, curve: pumpCurvePda(mint), lister: pk(LAUNCH_LAYOUT.lister), side,
+    mode: b[LAUNCH_LAYOUT.mode], bump: b[LAUNCH_LAYOUT.bump], solBump: b[LAUNCH_LAYOUT.solBump],
+    totalSold: b.readBigUInt64LE(LAUNCH_LAYOUT.totalSold), totalBurned: b.readBigUInt64LE(LAUNCH_LAYOUT.totalBurned),
+    totalLister: b.readBigUInt64LE(LAUNCH_LAYOUT.totalLister), totalBoost: b.readBigUInt64LE(LAUNCH_LAYOUT.totalBoost),
+  };
+}
+
+/** register_launch(side u8, mode u8).
+ *  0 lister (signer, payer) · 1 market · 2 launch (w, init) · 3 pump_mint · 4 bonding_curve · 5 system · 6 sharing_config */
+export function registerLaunchIx(lister: PublicKey, market: PublicKey, side: 0 | 1, mode: number, pumpMint: PublicKey) {
+  return new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [s(lister), r(market), w(launchPda(market, side)), r(pumpMint), r(pumpCurvePda(pumpMint)), r(SystemProgram.programId), r(sharingConfigPda(pumpMint))],
+    data: Buffer.from([TAG_REGISTER_LAUNCH, side, mode]),
+  });
+}
+
+/** Accounts `boost` cannot derive: the canonical pool's vaults, one buyback recipient, and the stake pool's reserve and manager-fee account.
+ *  The WSOL ATA must already exist (the instruction closes it). `user_volume_accumulator` is created inside boost when empty. */
+export type BoostVenue = { poolBase: PublicKey; poolQuote: PublicKey; buybackFeeRecipient: PublicKey; reserveStake: PublicKey; managerFee: PublicKey };
+
+/** boost(min_quote_out u64). Account order matches `boost` in programs/hooked/src/processor.rs. */
+export function boostIx(caller: PublicKey, launch: Launch, venue: BoostVenue, minQuoteOut: bigint) {
+  const memeAta = (owner: PublicKey) => getAssociatedTokenAddressSync(MEME_MINT, owner, true, TOKEN_2022_PROGRAM_ID);
+  const pool = memeVenue(MEME_MINT).pool;
+  const globalConfig = PublicKey.findProgramAddressSync([Buffer.from("global_config")], PUMPSWAP)[0];
+  const userVolume = PublicKey.findProgramAddressSync([Buffer.from("user_volume_accumulator"), launch.key.toBuffer()], PUMPSWAP)[0];
+  const feeConfig = PublicKey.findProgramAddressSync([Buffer.from("fee_config"), PS_FEE_CONFIG_SEED], PUMP_FEES)[0];
+  const eventAuthority = PublicKey.findProgramAddressSync([Buffer.from("__event_authority")], PUMPSWAP)[0];
+  const withdraw = PublicKey.findProgramAddressSync([STAKE_POOL_ACCT.toBuffer(), Buffer.from("withdraw")], STAKE_POOL_PROGRAM)[0];
+  return new TransactionInstruction({
+    programId: PROGRAM_ID,
+    keys: [
+      s(caller), r(launch.market), w(launch.key), w(memeAta(launch.key)), w(memeAta(launch.lister)), w(vaultPda(launch.market, launch.side)),
+      w(launchSolPda(launch.market, launch.side)), w(getAssociatedTokenAddressSync(WSOL_MINT, launch.key, true, TOKEN_PROGRAM_ID)),
+      w(MEME_MINT), r(WSOL_MINT), r(TOKEN_2022_PROGRAM_ID), r(TOKEN_PROGRAM_ID), r(SystemProgram.programId), r(PUMPSWAP),
+      r(globalConfig), w(pool), w(venue.poolBase), w(venue.poolQuote), w(userVolume), r(feeConfig), w(venue.buybackFeeRecipient), r(eventAuthority),
+      r(STAKE_POOL_PROGRAM), w(STAKE_POOL_ACCT), r(withdraw), w(venue.reserveStake), w(venue.managerFee), w(RFSTACC),
+    ],
+    data: Buffer.concat([Buffer.from([TAG_BOOST]), u64(minQuoteOut)]),
+  });
+}

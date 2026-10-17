@@ -18,7 +18,7 @@ for (const { pubkey, account } of res) {
   ms.push({ key: pubkey, bullMint: pk(8), bearMint: pk(40), oraclePool: pk(104), oracleObs: pk(136), windowSecs: d.readUInt32LE(480), underlyingIsToken0: d[489], config: new PublicKey(pool!.data.subarray(72, 104)) });
 }
 const wanted = [...globalAccounts(await readPool(conn), MEME), ...ms.flatMap(marketAccounts)];
-const vaults = await conn.getProgramAccounts(new PublicKey("2ZbjE44nSh3AmpREg4sdNMViBLAzAEtFKYDn1XdqMzEj"), { filters: [{ memcmp: { offset: 0, bytes: "HoK4CZtz9b6" } }] });
+const vaults = await conn.getProgramAccounts(new PublicKey("63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU"), { filters: [{ memcmp: { offset: 0, bytes: "HoK4CZtz9b6" } }] });
 const ray = await loadRay(conn, key);
 for (const { pubkey } of vaults) {
   const v = await readVault(conn, pubkey);

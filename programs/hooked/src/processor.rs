@@ -3,6 +3,7 @@ use {
         consts::*,
         cpi,
         error::HookedError,
+        launch::{boost_split, check_creator, decode_curve},
         math::*,
         oracle::{self, Point},
         state::*,
@@ -33,6 +34,8 @@ pub fn process_instruction(
         Some(&TAG_CLAIM_FEES) => claim_fees(program_id, accounts, &data[1..]),
         Some(&TAG_INIT_BURN) => init_burn(program_id, accounts),
         Some(&TAG_BURN_MEME) => burn_meme(program_id, accounts, &data[1..]),
+        Some(&TAG_REGISTER_LAUNCH) => register_launch(program_id, accounts, &data[1..]),
+        Some(&TAG_BOOST) => boost(program_id, accounts, &data[1..]),
         _ => Err(HookedError::InvalidInstruction.into()),
     }
 }
@@ -45,6 +48,27 @@ fn find_pda(seeds: &[&[u8]], program_id: &Address) -> (Address, u8) {
 fn find_pda(_seeds: &[&[u8]], _program_id: &Address) -> (Address, u8) {
     unimplemented!("on-chain only")
 }
+
+/// PDA from seeds + a stored bump (one sha256, no bump search).
+#[cfg(target_os = "solana")]
+fn create_pda(seeds: &[&[u8]], program_id: &Address) -> Result<Address, ProgramError> {
+    Address::create_program_address(seeds, program_id).map_err(|_| HookedError::InvalidPda.into())
+}
+#[cfg(not(target_os = "solana"))]
+fn create_pda(_seeds: &[&[u8]], _program_id: &Address) -> Result<Address, ProgramError> {
+    unimplemented!("on-chain only")
+}
+
+/// Program log: a static message followed by up to five numbers (`sol_log_64`).
+#[cfg(target_os = "solana")]
+fn log(msg: &str, v: [u64; 5]) {
+    unsafe {
+        pinocchio::syscalls::sol_log_(msg.as_ptr(), msg.len() as u64);
+        pinocchio::syscalls::sol_log_64_(v[0], v[1], v[2], v[3], v[4]);
+    }
+}
+#[cfg(not(target_os = "solana"))]
+fn log(_msg: &str, _v: [u64; 5]) {}
 
 fn require(cond: bool, e: HookedError) -> ProgramResult {
     if cond {
@@ -209,9 +233,10 @@ fn rebalance(
         let read = if m.oracle_kind == KIND_RAYDIUM_CLMM {
             require(obs.owner() == &RAYDIUM_CLMM, HookedError::InvalidOracle)?;
             let od = obs.try_borrow()?;
-            // a dead ring + the pool account => sample the pool's tick ourselves
+            // a dead ring + the pool account => sample the pool's tick ourselves, on long windows only:
+            // a 2-obs market keeps reading the ring, so a stale ring is no move until it writes again
             match pool {
-                Some(p) if oracle::ring_is_stale(&od, now) => {
+                Some(p) if oracle::samples(&od, m, now) => {
                     require(p.address() == &m.oracle_pool && p.owner() == &RAYDIUM_CLMM, HookedError::InvalidOracle)?;
                     let tick = {
                         let pd = p.try_borrow()?;
@@ -221,6 +246,10 @@ fn rebalance(
                 }
                 _ => oracle::read(&od, m)?,
             }
+        } else if oracle::is_two_obs(m.window_secs) {
+            // no stored venue point to read, and a 2-obs market never samples: no move
+            // (create_market refuses these; this covers any created before it did)
+            None
         } else {
             // no ring anywhere: every rebalance samples the venue's current tick
             let tick = venue_tick(m, obs, pool, ps_pool)?;
@@ -476,15 +505,21 @@ fn create_market(program_id: &Address, accounts: &mut [AccountView], data: &[u8]
     );
     require(market.address() == &market_key, HookedError::InvalidPda)?;
 
-    // kind 0 keeps the ring; every other kind is verified against its venue pool and sampled now
+    // kind 0 keeps the ring; every other kind is verified against its venue pool and sampled now.
+    // A 2-obs market never samples, so it needs a ring that records: kinds 1-4 and stale rings are refused.
+    let now = Clock::get()?.unix_timestamp as u32;
+    let two_obs = oracle::is_two_obs(window);
     let venue_tick0 = if kind == KIND_RAYDIUM_CLMM {
         require(
             oracle_obs.owner() == &RAYDIUM_CLMM && oracle_pool.owner() == &RAYDIUM_CLMM,
             HookedError::InvalidOracle,
         )?;
-        oracle::check_header(&oracle_obs.try_borrow()?, oracle_pool.address())?;
+        let od = oracle_obs.try_borrow()?;
+        oracle::check_header(&od, oracle_pool.address())?;
+        require(!(two_obs && oracle::ring_is_stale(&od, now)), HookedError::TwoObsNeedsLiveRing)?;
         None
     } else {
+        require(!two_obs, HookedError::TwoObsNeedsLiveRing)?;
         Some(check_venue(kind, flag, oracle_obs, oracle_pool, tail.first())?)
     };
     require(
@@ -557,7 +592,6 @@ fn create_market(program_id: &Address, accounts: &mut [AccountView], data: &[u8]
     m.underlying_is_token0 = flag;
     m.bump = bump;
     m.oracle_kind = kind;
-    let now = Clock::get()?.unix_timestamp as u32;
     let (end, twap) = match venue_tick0 {
         Some(tick) => {
             // kinds 1-4: the sampled tick is the baseline; the first checkpoint anchors the window
@@ -566,7 +600,7 @@ fn create_market(program_id: &Address, accounts: &mut [AccountView], data: &[u8]
         }
         None => {
             let od = oracle_obs.try_borrow()?;
-            if oracle::ring_is_stale(&od, now) {
+            if oracle::samples(&od, m, now) {
                 // dead ring: start from the pool's own tick, sampling takes over from here
                 let tick = {
                     let pd = oracle_pool.try_borrow()?;
@@ -687,7 +721,7 @@ fn redeem(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> Pr
     let fee = ((gross as u128) * REDEEM_FEE_BPS / BPS) as u64;
     let payout = gross - fee;
 
-    cpi::burn(token_2022, user_token, mint, user, amount)?;
+    cpi::burn(token_2022, user_token, mint, user, amount, &[])?;
     let s = seeds.seeds();
     if payout > 0 {
         cpi::transfer(token_program, own, user_quote, market, payout, &[signer(&s)])?;
@@ -876,6 +910,36 @@ fn claim_fees(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -
     Ok(())
 }
 
+/// Canonical PumpSwap pool of MEME_MINT/WSOL: PDA ["pool", 0u16, pump ["pool-authority", mint], mint, WSOL].
+fn check_meme_pool(ps_pool: &AccountView, ps_base_ata: &AccountView, ps_quote_ata: &AccountView) -> ProgramResult {
+    require(ps_pool.owner() == &PUMPSWAP, HookedError::InvalidVenue)?;
+    let mint = MEME_MINT.to_bytes();
+    let (auth, _) = find_pda(&[b"pool-authority", &mint], &PUMP);
+    let auth_b = auth.to_bytes();
+    let index = 0u16.to_le_bytes();
+    let wsol = WSOL.to_bytes();
+    let (pool_key, _) = find_pda(&[b"pool", &index, &auth_b, &mint, &wsol], &PUMPSWAP);
+    require(ps_pool.address() == &pool_key, HookedError::InvalidVenue)?;
+    let d = ps_pool.try_borrow()?;
+    if d.len() < PS_POOL_MIN_LEN || d[..8] != PS_POOL_DISC {
+        return Err(HookedError::InvalidVenue.into());
+    }
+    require(read_address(&d, PS_BASE_MINT)? == MEME_MINT.as_array(), HookedError::InvalidVenue)?;
+    require(read_address(&d, PS_QUOTE_MINT)? == WSOL.as_array(), HookedError::InvalidVenue)?;
+    require(ps_base_ata.address().as_array() == read_address(&d, PS_BASE_ATA)?, HookedError::InvalidVenue)?;
+    require(ps_quote_ata.address().as_array() == read_address(&d, PS_QUOTE_ATA)?, HookedError::InvalidVenue)?;
+    Ok(())
+}
+
+/// (mint, owner) of a token account, plus its amount. `boost` rejects anything else.
+fn launch_token(acct: &AccountView, mint: &[u8; 32], owner: &[u8; 32]) -> Result<u64, ProgramError> {
+    let d = acct.try_borrow()?;
+    if d.len() < 72 || read_address(&d, 0)? != mint || read_address(&d, 32)? != owner {
+        return Err(HookedError::InvalidLaunchTokenAccount.into());
+    }
+    Ok(u64::from_le_bytes(d[64..72].try_into().unwrap()))
+}
+
 /// Permissionless, idempotent: creates the global burn-state PDA and the burn pot (an r-freestacc account
 /// owned by it). [payer(s), burn_state(w), burn_vault(w), quote_mint, system, token program]
 fn init_burn(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
@@ -949,18 +1013,7 @@ fn burn_meme(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) ->
             let vs = u64::from_le_bytes(bc[BC_VIRTUAL_SOL..BC_VIRTUAL_SOL + 8].try_into().unwrap()) as u128;
             vs * n / (vt + n) * (BPS - PUMP_FEE_BPS) / BPS
         } else {
-            let (auth, _) = find_pda(&[b"pool-authority", &mint_bytes], &PUMP);
-            let (pool_key, _) = find_pda(&[b"pool", &0u16.to_le_bytes(), auth.as_array(), &mint_bytes, WSOL.as_array()], &PUMPSWAP);
-            require(ps_pool.address() == &pool_key && ps_pool.owner() == &PUMPSWAP, HookedError::InvalidVenue)?;
-            let pd = ps_pool.try_borrow()?;
-            require(
-                pd.len() >= PS_QUOTE_ATA + 32
-                    && read_address(&pd, PS_BASE_MINT)? == mint_bytes.as_slice()
-                    && read_address(&pd, PS_QUOTE_MINT)? == WSOL.as_array()
-                    && read_address(&pd, PS_BASE_ATA)? == ps_base_ata.address().as_array()
-                    && read_address(&pd, PS_QUOTE_ATA)? == ps_quote_ata.address().as_array(),
-                HookedError::InvalidVenue,
-            )?;
+            check_meme_pool(ps_pool, ps_base_ata, ps_quote_ata)?;
             let bb = token_amount(ps_base_ata)? as u128;
             let qb = token_amount(ps_quote_ata)? as u128;
             qb * n / (bb + n) * (BPS - PUMPSWAP_FEE_BPS) / BPS
@@ -989,7 +1042,305 @@ fn burn_meme(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) ->
         [st.bump]
     };
     // burn with the caller's own authority (they signed this instruction), then pay them from the pot
-    cpi::burn(meme_program, caller_meme, meme_mint, caller, amount)?;
+    cpi::burn(meme_program, caller_meme, meme_mint, caller, amount, &[])?;
     let sseeds = [Seed::from(BURN_STATE_SEED), Seed::from(&seeds)];
     cpi::transfer(token_program, burn_vault, caller_quote, burn_state, payout, &[Signer::from(&sseeds)])
+}
+
+/// register_launch(side u8, mode u8). One companion coin per (market, side). The lister is the creator.
+///
+/// 0 lister (signer, payer)
+/// 1 market
+/// 2 launch (w, init)            ["launch", market, side]
+/// 3 pump_mint
+/// 4 bonding_curve               pump ["bonding-curve", pump_mint]
+/// 5 system_program
+/// 6 sharing_config              Pump Fees ["sharing-config", pump_mint], read-only even when still empty
+#[inline(never)]
+fn register_launch(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+    let [lister, market, launch, pump_mint, bonding_curve, system, sharing, ..] = accounts else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    require(lister.is_signer(), HookedError::MissingSigner)?;
+    require(system.address() == &SYSTEM, HookedError::InvalidProgram)?;
+    require(MEME_MINT != SYSTEM, HookedError::MemeNotSet)?;
+    let side = side_arg(data)?;
+    let mode = match data.get(1) {
+        Some(&m) if m == LAUNCH_MODE_SHARED || m == LAUNCH_MODE_FULL => m,
+        _ => return Err(HookedError::InvalidInstruction.into()),
+    };
+    require(market.owner() == program_id, HookedError::InvalidMarket)?;
+    {
+        let d = market.try_borrow()?;
+        Market::from_bytes(&d)?;
+    }
+    let market_bytes = market.address().to_bytes();
+    let side_b = [side];
+    let (launch_key, bump) = find_pda(&[LAUNCH_SEED, &market_bytes, &side_b], program_id);
+    require(launch.address() == &launch_key, HookedError::InvalidLaunch)?;
+    if launch.data_len() != 0 {
+        return Err(HookedError::LaunchExists.into());
+    }
+    let (_, sol_bump) = find_pda(&[LAUNCH_SOL_SEED, &market_bytes, &side_b], program_id);
+
+    let mint_bytes = pump_mint.address().to_bytes();
+    let (bc_key, _) = find_pda(&[b"bonding-curve", &mint_bytes], &PUMP);
+    require(
+        bonding_curve.address() == &bc_key && bonding_curve.owner() == &PUMP,
+        HookedError::InvalidLaunchCurve,
+    )?;
+    let curve = {
+        let d = bonding_curve.try_borrow()?;
+        decode_curve(&d)?
+    };
+    require(curve.quote_mint == *MEME_MINT.as_array(), HookedError::InvalidLaunchCurve)?;
+    let (sc_key, _) = find_pda(&[b"sharing-config", &mint_bytes], &PUMP_FEES);
+    require(sharing.address() == &sc_key, HookedError::InvalidSharingConfig)?;
+    if sharing.data_len() > 0 && sharing.owner() == &PUMP_FEES {
+        let d = sharing.try_borrow()?;
+        check_creator(
+            &curve,
+            &mint_bytes,
+            lister.address().as_array(),
+            launch.address().as_array(),
+            sc_key.as_array(),
+            Some(&d),
+            mode,
+        )?;
+    } else {
+        check_creator(
+            &curve,
+            &mint_bytes,
+            lister.address().as_array(),
+            launch.address().as_array(),
+            sc_key.as_array(),
+            None,
+            mode,
+        )?;
+    }
+
+    let rent = Rent::get()?;
+    let bump_b = [bump];
+    let seeds = [
+        Seed::from(LAUNCH_SEED),
+        Seed::from(&market_bytes),
+        Seed::from(&side_b),
+        Seed::from(&bump_b),
+    ];
+    cpi::create_pda_account(
+        system,
+        lister,
+        launch,
+        Launch::LEN as u64,
+        program_id,
+        rent.try_minimum_balance(Launch::LEN)?,
+        &[Signer::from(&seeds)],
+    )?;
+    let mut d = launch.try_borrow_mut()?;
+    d[..8].copy_from_slice(&LAUNCH_DISC);
+    let rec = Launch::from_bytes_mut(&mut d)?;
+    rec.market = *market.address();
+    rec.pump_mint = *pump_mint.address();
+    rec.creator = *lister.address();
+    rec.side = side;
+    rec.mode = mode;
+    rec.bump = bump;
+    rec.sol_bump = sol_bump;
+    rec.total_sold = 0;
+    rec.total_burned = 0;
+    rec.total_lister = 0;
+    rec.total_boost = 0;
+    Ok(())
+}
+
+/// boost(min_quote_out u64). Permissionless. Below BOOST_DUST it is a success and moves nothing.
+/// Spends only the Launch PDA's MEME account. Mode 1 also credits `lister_meme` (10%). The sell-leg
+/// goes to the canonical MEME/WSOL PumpSwap pool; the WSOL is closed into `launch_sol` and deposited
+/// to the stake pool, which mints r-freestacc into this side's vault. The burn-leg is burned.
+///
+///  0 caller (signer; pays rent, never debited of tokens)
+///  1 market
+///  2 launch (w)                     ["launch", market, side]
+///  3 launch_meme (w)                Launch PDA's MEME token account — the only MEME spent
+///  4 lister_meme (w)                lister's MEME token account (paid in mode 1 only)
+///  5 side_vault (w)                 this side's market vault; receives r-freestacc
+///  6 launch_sol (w)                 ["launch-sol", market, side], system-owned, unwrapped SOL
+///  7 wsol_ata (w)                   Launch PDA's WSOL account; sell quote, then closed into launch_sol
+///  8 meme_mint (w)
+///  9 wsol_mint
+/// 10 meme_token_program            Token-2022
+/// 11 token_program                 Tokenkeg (WSOL, r-freestacc, the stake-pool mint)
+/// 12 system_program
+/// 13 pumpswap_program
+/// 14 global_config                 ["global_config"]
+/// 15 ps_pool (w)                   canonical MEME/WSOL pool (same derivation as burn_meme)
+/// 16 pool_base (w)
+/// 17 pool_quote (w)
+/// 18 user_volume_accumulator (w)   ["user_volume_accumulator", launch]; created here if empty
+/// 19 fee_config                    Pump Fees ["fee_config", PS_FEE_CONFIG_SEED]
+/// 20 buyback_fee_recipient (w)
+/// 21 event_authority               ["__event_authority"]
+/// 22 stake_pool_program
+/// 23 stake_pool (w)
+/// 24 withdraw_authority            [stake_pool, "withdraw"]
+/// 25 reserve_stake (w)
+/// 26 manager_fee (w)
+/// 27 pool_mint (w)                 QUOTE_MINT. Referral of the deposit is `side_vault` (not a separate account).
+#[inline(never)]
+fn boost(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+    let [caller, market, launch, launch_meme, lister_meme, side_vault, launch_sol, wsol_ata, meme_mint, wsol_mint, meme_program, token_program, system, ps_program, global_config, ps_pool, pool_base, pool_quote, user_volume, fee_config, buyback, event_authority, sp_program, stake_pool, withdraw_authority, reserve, manager_fee, pool_mint, ..] =
+        accounts
+    else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+    let min_out = amount_arg(data, 0)?;
+    require(caller.is_signer(), HookedError::MissingSigner)?;
+    require(MEME_MINT != SYSTEM, HookedError::MemeNotSet)?;
+    require(launch.owner() == program_id && market.owner() == program_id, HookedError::InvalidLaunch)?;
+    require(market.address() != launch.address(), HookedError::InvalidLaunch)?;
+
+    let (market_bytes, creator, side, mode, bump, sol_bump) = {
+        let d = launch.try_borrow()?;
+        let rec = Launch::from_bytes(&d)?;
+        require(rec.market == *market.address(), HookedError::InvalidLaunch)?;
+        (rec.market.to_bytes(), rec.creator.to_bytes(), rec.side, rec.mode, rec.bump, rec.sol_bump)
+    };
+    let side_b = [side];
+    let bump_b = [bump];
+    let derived = create_pda(&[LAUNCH_SEED, &market_bytes, &side_b, &bump_b], program_id)?;
+    require(derived == *launch.address(), HookedError::InvalidLaunch)?;
+    let vault_addr = {
+        let d = market.try_borrow()?;
+        let m = Market::from_bytes(&d)?;
+        require(side == SIDE_BULL || side == SIDE_BEAR, HookedError::InvalidLaunch)?;
+        *m.vault(side)
+    };
+    let bal = launch_token(launch_meme, MEME_MINT.as_array(), launch.address().as_array())?;
+    let Some(split) = boost_split(bal, mode)? else {
+        return Ok(());
+    };
+
+    require(side_vault.address() == &vault_addr, HookedError::InvalidVault)?;
+    launch_token(side_vault, QUOTE_MINT.as_array(), market.address().as_array())?;
+    launch_token(wsol_ata, WSOL.as_array(), launch.address().as_array())?;
+    require(
+        meme_mint.address() == &MEME_MINT
+            && wsol_mint.address() == &WSOL
+            && meme_mint.owner() == meme_program.address()
+            && (meme_program.address() == &TOKEN_2022 || meme_program.address() == &TOKENKEG)
+            && token_program.address() == &TOKENKEG
+            && system.address() == &SYSTEM
+            && ps_program.address() == &PUMPSWAP
+            && sp_program.address() == &STAKE_POOL_PROGRAM
+            && stake_pool.address() == &STAKE_POOL
+            && pool_mint.address() == &QUOTE_MINT,
+        HookedError::InvalidProgram,
+    )?;
+    let sol_bump_b = [sol_bump];
+    let sol_key = create_pda(&[LAUNCH_SOL_SEED, &market_bytes, &side_b, &sol_bump_b], program_id)?;
+    require(launch_sol.address() == &sol_key, HookedError::InvalidLaunch)?;
+    let (gc, _) = find_pda(&[b"global_config"], &PUMPSWAP);
+    let (uva, _) = find_pda(&[b"user_volume_accumulator", launch.address().as_array()], &PUMPSWAP);
+    let (fc, _) = find_pda(&[b"fee_config", &PS_FEE_CONFIG_SEED], &PUMP_FEES);
+    let (ev, _) = find_pda(&[b"__event_authority"], &PUMPSWAP);
+    require(
+        global_config.address() == &gc && user_volume.address() == &uva && fee_config.address() == &fc && event_authority.address() == &ev,
+        HookedError::InvalidVenue,
+    )?;
+    check_meme_pool(ps_pool, pool_base, pool_quote)?;
+    let (wa, _) = find_pda(&[STAKE_POOL.as_array(), b"withdraw"], &STAKE_POOL_PROGRAM);
+    require(withdraw_authority.address() == &wa, HookedError::InvalidBurnAccounts)?;
+    {
+        let d = stake_pool.try_borrow()?;
+        require(d.len() >= SP_MANAGER_FEE + 32, HookedError::InvalidBurnAccounts)?;
+        require(read_address(&d, SP_RESERVE_STAKE)? == reserve.address().as_array(), HookedError::InvalidBurnAccounts)?;
+        require(read_address(&d, SP_POOL_MINT)? == QUOTE_MINT.as_array(), HookedError::InvalidBurnAccounts)?;
+        require(read_address(&d, SP_MANAGER_FEE)? == manager_fee.address().as_array(), HookedError::InvalidBurnAccounts)?;
+    }
+
+    let launch_seeds = [
+        Seed::from(LAUNCH_SEED),
+        Seed::from(&market_bytes),
+        Seed::from(&side_b),
+        Seed::from(&bump_b),
+    ];
+    let launch_signer = [Signer::from(&launch_seeds)];
+    if split.lister > 0 {
+        launch_token(lister_meme, MEME_MINT.as_array(), &creator)?;
+        cpi::transfer(meme_program, launch_meme, lister_meme, launch, split.lister, &launch_signer)?;
+    }
+    if split.burn > 0 {
+        cpi::burn(meme_program, launch_meme, meme_mint, launch, split.burn, &launch_signer)?;
+    }
+    if user_volume.data_len() == 0 {
+        cpi::init_user_volume_accumulator(ps_program, caller, launch, user_volume, system, event_authority)?;
+    }
+    let pre_wsol = token_amount(wsol_ata)?;
+    cpi::PumpSwapSellV2 {
+        program: ps_program,
+        pool: ps_pool,
+        user: launch,
+        global_config,
+        base_mint: meme_mint,
+        quote_mint: wsol_mint,
+        user_base: launch_meme,
+        user_quote: wsol_ata,
+        pool_base,
+        pool_quote,
+        base_token_program: meme_program,
+        quote_token_program: token_program,
+        system,
+        user_volume_accumulator: user_volume,
+        fee_config,
+        buyback_fee_recipient: buyback,
+        event_authority,
+    }
+    .invoke(split.sell, min_out, &launch_signer)?;
+    let got = token_amount(wsol_ata)?.checked_sub(pre_wsol).ok_or(HookedError::MathOverflow)?;
+
+    let sol_seeds = [
+        Seed::from(LAUNCH_SOL_SEED),
+        Seed::from(&market_bytes),
+        Seed::from(&side_b),
+        Seed::from(&sol_bump_b),
+    ];
+    if launch_sol.lamports() == 0 {
+        let rent0 = Rent::get()?.try_minimum_balance(0)?;
+        cpi::create_pda_account(system, caller, launch_sol, 0, &SYSTEM, rent0, &[Signer::from(&sol_seeds)])?;
+    } else {
+        require(launch_sol.owner() == &SYSTEM && launch_sol.data_len() == 0, HookedError::InvalidLaunch)?;
+    }
+    cpi::close_account(token_program, wsol_ata, launch_sol, launch, &launch_signer)?;
+    let floor = Rent::get()?.try_minimum_balance(0)?;
+    let have = launch_sol.lamports();
+    require(have >= floor, HookedError::MathOverflow)?;
+    let spare = have - floor;
+    let pre_vault = token_amount(side_vault)?;
+    if spare > 0 {
+        cpi::StakePoolDepositSol {
+            program: sp_program,
+            stake_pool,
+            withdraw_authority,
+            reserve_stake: reserve,
+            funding: launch_sol,
+            destination: side_vault,
+            manager_fee,
+            referral: side_vault,
+            pool_mint,
+            system,
+            token_program,
+        }
+        .invoke(spare, &[Signer::from(&sol_seeds)])?;
+    }
+    let minted = token_amount(side_vault)?.saturating_sub(pre_vault);
+    {
+        let mut d = launch.try_borrow_mut()?;
+        let rec = Launch::from_bytes_mut(&mut d)?;
+        rec.total_sold = rec.total_sold.saturating_add(split.sell);
+        rec.total_burned = rec.total_burned.saturating_add(split.burn);
+        rec.total_lister = rec.total_lister.saturating_add(split.lister);
+        rec.total_boost = rec.total_boost.saturating_add(minted);
+    }
+    log("boost", [split.sell, split.burn, split.lister, minted, got]);
+    Ok(())
 }

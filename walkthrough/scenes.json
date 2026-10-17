@@ -1,0 +1,60 @@
+{
+  "video": "/Users/stacc/hooked/walkthrough/raw/261fd46105ed502d55481a01775b4bf8.webm",
+  "scenes": [
+    {
+      "id": "swap",
+      "title": "1 · Swap",
+      "start": 0.069,
+      "end": 122.528
+    },
+    {
+      "id": "board",
+      "title": "2 · The board",
+      "start": 122.528,
+      "end": 164.197
+    },
+    {
+      "id": "market",
+      "title": "3 · Ape a side",
+      "start": 164.197,
+      "end": 218.444
+    },
+    {
+      "id": "bag",
+      "title": "4 · Your bag",
+      "start": 218.444,
+      "end": 251.767
+    },
+    {
+      "id": "wrap",
+      "title": "5 · Wrap to SPL",
+      "start": 251.767,
+      "end": 302.966
+    },
+    {
+      "id": "yield",
+      "title": "6 · Park SOL for yield",
+      "start": 302.966,
+      "end": 396.84
+    },
+    {
+      "id": "swapbag",
+      "title": "7 · Sell the swap's bets",
+      "start": 396.84,
+      "end": 425.271
+    },
+    {
+      "id": "list",
+      "title": "8 · List any coin",
+      "start": 425.271,
+      "end": 488.5
+    },
+    {
+      "id": "spicy",
+      "title": "9 · Spicy, arena, leaderboard",
+      "start": 488.5,
+      "end": 535.347
+    }
+  ],
+  "errors": []
+}

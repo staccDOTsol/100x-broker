@@ -3,6 +3,7 @@
 //!
 //! Sampling mode (dead CLMM rings and every non-CLMM `oracle_kind`) integrates a tick the program
 //! reads itself over our own checkpoints; `ring` is `None` when there is no observation ring at all.
+//! 2-obs markets (`is_two_obs`) never sample: a stale ring means no move until the ring writes again.
 
 use {
     crate::{
@@ -101,6 +102,20 @@ pub fn ring_is_stale(data: &[u8], now: u32) -> bool {
         Ok(p) => p.ts.saturating_add(RING_STALE_SECS) < now,
         Err(_) => true,
     }
+}
+
+/// 2-obs market: the window is shorter than one checkpoint spacing, so the TWAP runs between the
+/// ring's two newest stored points (TWAP-2OBS.md). Such a market never samples, see `samples`.
+pub fn is_two_obs(window_secs: u32) -> bool {
+    window_secs < CKPT_SPACING_SECS
+}
+
+/// Whether a kind-0 rebalance samples the pool's live tick instead of reading the ring: only a stale
+/// ring on a long window, where one sample moves the TWAP by elapsed/window. On a 2-obs market the
+/// sample would be nearly all of the TWAP and an earlier instruction in the same bundle can set it,
+/// so there a stale ring means no move until the ring stores a new observation.
+pub fn samples(ring: &[u8], m: &Market, now: u32) -> bool {
+    !is_two_obs(m.window_secs) && ring_is_stale(ring, now)
 }
 
 /// Self-sampled end point: the newest known cumulative (ring or our checkpoints) extended with the
@@ -213,6 +228,60 @@ mod tests {
         // same-second re-read does not integrate anything (dt = 0 from the newest checkpoint)
         let (again, _) = read_sampled(None, &m, now + 600, 999_999).unwrap();
         assert_eq!(again, end);
+    }
+
+    #[test]
+    fn two_obs_boundary() {
+        assert!(is_two_obs(1) && is_two_obs(CKPT_SPACING_SECS - 1));
+        assert!(!is_two_obs(CKPT_SPACING_SECS) && !is_two_obs(600) && !is_two_obs(3_960));
+    }
+
+    /// A window-1 market on a ring that goes quiet for an hour: sampling would hand the TWAP to the
+    /// live tick (pushable in the same bundle), so the market keeps reading the ring, sees nothing new,
+    /// and moves again only once Raydium stores the next observation.
+    #[test]
+    fn two_obs_stale_ring_waits_for_the_ring() {
+        let pool = Address::new_from_array([7; 32]);
+        // tick 1000 held, one observation every 15 s; the market consumed the newest one at t
+        let pts: [(u32, i64); 10] = core::array::from_fn(|i| (10_000 + 15 * i as u32, 1_000 * 15 * i as i64));
+        let mut d = ring(&pts, 9, &pool);
+        let (t, cum_t) = pts[9];
+        let mut m = unsafe { core::mem::zeroed::<Market>() };
+        m.oracle_pool = pool;
+        m.window_secs = 1;
+        let (end, twap) = read(&d, &m).unwrap().unwrap();
+        assert_eq!((end.ts, twap), (t, 1_000i64 << 32));
+        m.push_ckpt(end.ts, end.tick_cumulative);
+        m.last_obs_ts = end.ts;
+        m.last_twap_q32 = twap;
+
+        let now = t + RING_STALE_SECS + 1;
+        assert!(ring_is_stale(&d, now));
+        // the hole: a sample at a pool pushed 1 % (100 ticks) is the whole TWAP
+        let (_, pushed) = read_sampled(Some(&d), &m, now, 1_100).unwrap();
+        assert_eq!(pushed.unwrap(), 1_100i64 << 32);
+        // what rebalance does instead: no sample, the ring read returns the point already consumed,
+        // so `end.ts <= last_obs_ts` and nothing moves
+        assert!(!samples(&d, &m, now));
+        let (end, _) = read(&d, &m).unwrap().unwrap();
+        assert!(end.ts <= m.last_obs_ts);
+        // long windows keep sampling dead rings, as before
+        let mut long = unsafe { core::mem::zeroed::<Market>() };
+        long.window_secs = 600;
+        assert!(samples(&d, &long, now));
+
+        // resume: a swap at t2 makes Raydium store tick 1000 (the pre-swap tick) over the whole gap
+        let t2 = now + 5;
+        let o = RAY_OBS_RING + 10 * RAY_OBS_SIZE;
+        d[o..o + 4].copy_from_slice(&t2.to_le_bytes());
+        d[o + 4..o + 12].copy_from_slice(&(cum_t + 1_000 * (t2 - t) as i64).to_le_bytes());
+        d[RAY_OBS_INDEX..RAY_OBS_INDEX + 2].copy_from_slice(&10u16.to_le_bytes());
+        assert!(!ring_is_stale(&d, t2) && !samples(&d, &m, t2));
+        let (end, twap) = read(&d, &m).unwrap().unwrap();
+        assert_eq!(end.ts, t2);
+        assert!(end.ts > m.last_obs_ts);
+        // start is the point consumed at t: the price never moved, and the push never reached the TWAP
+        assert_eq!(twap, m.last_twap_q32);
     }
 
     #[test]

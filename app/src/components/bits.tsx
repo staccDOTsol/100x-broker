@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import type { WalletName } from "@solana/wallet-adapter-base";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { short, lev as fmtLev, usd } from "../lib/format";
 import { usePrices, type Quote } from "../hooks/price";
@@ -152,18 +153,21 @@ function Onboard({ step, addr, lamports, onBurner, onConnectAnyway, onDone, onCl
   );
 }
 
-export function WalletButton() {
+export function WalletButton({ solo = false }: { solo?: boolean } = {}) {
   const { wallets, select, wallet, publicKey, connecting, connect, disconnect } = useWallet();
   const toasts = useToasts();
   const [open, setOpen] = useState(false);
   // set by "try with a burner" (or picking Burner in the list): connect once the provider has swapped adapters, then open the panel
   const [wantBurner, setWantBurner] = useState(false);
+  const [pending, setPending] = useState<string | null>(null);
+  const [pick, setPick] = useState(0);
   const [ob, setOb] = useState<"pick" | "done" | null>(null);
   const [obLamports, setObLamports] = useState<bigint | null>(null);
   const ref = useRef<HTMLDivElement>(null);
-  // first visit, no wallet: the "whoa" card shows itself once, a beat after the page settles
+  // first visit, no wallet: the "whoa" card shows itself once, a beat after the page settles. Not on /presale, whose
+  // whole point is that there's no wallet to connect.
   useEffect(() => {
-    if (publicKey || seenOnboarding()) return;
+    if (solo || publicKey || seenOnboarding() || location.pathname.startsWith("/presale")) return;
     const t = setTimeout(() => setOb((o) => o ?? "pick"), 2500);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -184,28 +188,54 @@ export function WalletButton() {
     if (publicKey) track("connect", { wallet: wallet?.adapter.name ?? "?" });
   }, [publicKey, wallet]);
   const hasBurner = wallets.some((w) => w.adapter.name === BURNER_NAME);
-  // select() only changes the provider's state; the connect has to wait for the render where `wallet` is the burner
+  // A wallet that never settles leaves the header as a spinner and blocks the next click.
+  useLayoutEffect(() => {
+    for (const w of wallets) {
+      if (w.adapter.name !== BURNER_NAME) continue; // extension wallets go through the provider's own connect
+      const adapter = w.adapter as { connect: () => Promise<void>; __bounded?: boolean };
+      if (adapter.__bounded) continue;
+      adapter.__bounded = true;
+      const call = adapter.connect.bind(adapter);
+      adapter.connect = () => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        return Promise.race([
+          call(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Wallet didn't answer. Open it and try again.")), 15_000);
+          }),
+        ]).finally(() => clearTimeout(timer));
+      };
+    }
+  }, [wallets]);
+  // select() only changes the provider's state. Connect the adapter itself once it is current, after the
+  // provider has subscribed (parent effects run first). The provider's connect() no-ops while a previous
+  // attempt is still marked connecting, which is how the button gets stuck on a spinner.
+  const toastRef = useRef(toasts);
+  toastRef.current = toasts;
   useEffect(() => {
-    if (!wantBurner || !isBurner) return;
+    if (!pending || wallet?.adapter.name !== pending) return;
     if (publicKey) {
+      setPending(null);
       setWantBurner(false);
-      // from the onboarding card: show "saddle up" with the address; otherwise the fund-it line is the first thing they see
-      if (ob === "pick") setOb("done");
-      else setOpen(true);
+      if (pending === BURNER_NAME) {
+        if (ob === "pick") setOb("done");
+        else setOpen(true);
+      }
       return;
     }
-    // The provider auto-connects a freshly selected adapter from its own effect, which runs AFTER ours (parent effects run
-    // last). Connecting here first makes the adapter emit `connect` before the provider is listening: key minted, header
-    // still says Connect. So wait for the provider; only step in if nothing has happened shortly.
+    // The provider (autoConnect) connects a wallet the user just picked, with its listener already attached; connecting it
+    // here first made the burner emit `connect` before anyone listened, and the button never left "Connect". Only step in
+    // when nothing has happened shortly (re-picking a wallet that is selected but not connected).
     const t = setTimeout(() => {
       if (connecting) return;
-      connect().catch((e) => {
+      connect().catch((e: unknown) => {
+        setPending(null);
         setWantBurner(false);
-        toasts.push({ s: "err", title: "Burner", body: humanError(e) });
+        toastRef.current.push({ s: "err", title: "Wallet", body: humanError(e) });
       });
-    }, 1200);
+    }, 1500);
     return () => clearTimeout(t);
-  }, [wantBurner, isBurner, publicKey, connecting, connect, toasts, ob]);
+  }, [pending, pick, wallet?.adapter, publicKey, ob, connecting, connect]);
   // the "saddle up" step shows the fresh burner's balance
   useEffect(() => {
     if (ob !== "done" || !publicKey) return;
@@ -215,12 +245,22 @@ export function WalletButton() {
       alive = false;
     };
   }, [ob, publicKey]);
-  const tryBurner = () => {
+  const choose = (name: string) => {
     setOpen(false);
+    if (name !== BURNER_NAME) {
+      // Phantom & co: the standard flow. select() + the provider's autoConnect connects a wallet the user picked, with the
+      // provider already listening for its connect event. Re-picking the selected-but-disconnected wallet retries.
+      if (wallet?.adapter.name === name && !publicKey) connect().catch((e) => toasts.push({ s: "err", title: "Wallet", body: humanError(e) }));
+      else select(name as WalletName);
+      return;
+    }
     markOnboarded();
     setWantBurner(true);
-    select(BURNER_NAME);
+    setPending(name);
+    setPick((n) => n + 1);
+    if (wallet?.adapter.name !== name) select(name as WalletName);
   };
+  const tryBurner = () => choose(BURNER_NAME);
   const closeOb = () => {
     markOnboarded();
     setOb(null);
@@ -234,7 +274,7 @@ export function WalletButton() {
         <button
           type="button"
           className="btn ghost small"
-          data-loading={connecting && wantBurner}
+          data-loading={!!pending && !publicKey && wantBurner}
           title="A throwaway wallet that lives in this browser. Put a few bucks in, play, sweep it out later."
           onClick={tryBurner}
         >
@@ -246,7 +286,7 @@ export function WalletButton() {
         data-loading={connecting && !wantBurner}
         aria-expanded={open}
         aria-haspopup={isBurner ? "dialog" : "menu"}
-        onClick={() => (!publicKey && !seenOnboarding() ? setOb("pick") : setOpen((o) => !o))}
+        onClick={() => (!solo && !publicKey && !seenOnboarding() ? setOb("pick") : setOpen((o) => !o))}
       >
         {publicKey ? (
           <>
@@ -295,11 +335,7 @@ export function WalletButton() {
                 <button
                   role="menuitem"
                   key={w.adapter.name}
-                  onClick={() => {
-                    if (w.adapter.name === BURNER_NAME) setWantBurner(true);
-                    select(w.adapter.name);
-                    setOpen(false);
-                  }}
+                  onClick={() => choose(w.adapter.name)}
                 >
                   <img src={w.adapter.icon} alt="" />
                   {w.adapter.name}
@@ -322,6 +358,7 @@ export function WalletButton() {
                       Open in {l.name}
                     </a>
                   ))}
+                  <div className="none">Jupiter Mobile has no link for this: open its browser (the globe) and go to {location.host}.</div>
                 </>
               ) : ready.length ? null : (
                 <div className="none">No Solana wallet found in this browser.</div>

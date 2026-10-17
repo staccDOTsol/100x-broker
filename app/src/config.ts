@@ -4,9 +4,18 @@ import { PublicKey } from "@solana/web3.js";
 const env: Record<string, string | undefined> = (import.meta as any).env ?? {};
 
 export const PROGRAM_ID = new PublicKey(
-  env.VITE_PROGRAM_ID ?? "T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb",
+  env.VITE_PROGRAM_ID ?? "9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6",
 );
 export const RFSTACC = new PublicKey("pSYRpDqr847kB2nD5ZhjcPsHLV2ZpUxweXm1MwiSTcc");
+/** Markets that exist on chain but must never be listed: the first PUMP / SOL / BTC markets under program 9g7ovq… were created with a
+ *  66-minute window (copied from the old board) instead of the owner's 2-observation rule (window_secs = 1). The window is in the
+ *  market's PDA seeds, so they cannot be fixed, only hidden; the window-1 replacements are what the site lists. */
+export const RETIRED_MARKETS = new Set([
+  "FguvR3kaMdeuvZ8eKuhz9jDP1S3ApRjJHGFvTKuQn5Gj", // PUMP, window 3960
+  "7379fbMnbbsGThpxLBnTbumhvWenAMCkf5bkh3zCBNwW", // SOL, window 3960
+  "33HifKMSbX7CVyQCh292KrYzGNG2MDEbHcFv1xim59ka", // BTC (WBTC), window 3960
+]);
+
 export const DBC = new PublicKey("dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN");
 export const RAYDIUM_CLMM = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
 export const WSOL = new PublicKey("So11111111111111111111111111111111111111112");

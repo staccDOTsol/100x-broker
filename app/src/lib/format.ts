@@ -59,3 +59,14 @@ export function usdPrice(x: number | null | undefined): string {
   if (x === null || x === undefined || !Number.isFinite(x)) return "—";
   return `$${price(x)}`;
 }
+/** Big money, short: $1.23K · $4.5M · $812. */
+export function usdShort(x: number | null | undefined): string {
+  if (x === null || x === undefined || !Number.isFinite(x)) return "—";
+  const a = Math.abs(x);
+  const s = x < 0 ? "−" : "";
+  if (a >= 1e9) return `${s}$${(a / 1e9).toFixed(2)}B`;
+  if (a >= 1e6) return `${s}$${(a / 1e6).toFixed(2)}M`;
+  if (a >= 1e4) return `${s}$${(a / 1e3).toFixed(1)}K`;
+  if (a >= 1) return `${s}$${a.toFixed(a >= 100 ? 0 : 2)}`;
+  return a === 0 ? "$0" : `${s}$${a.toFixed(2)}`;
+}

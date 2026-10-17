@@ -4,8 +4,10 @@ import { Link } from "react-router-dom";
 import { usePoll } from "../hooks";
 import { Delta } from "./Pulse";
 import { Tweet } from "./Share";
+import { CatEmpty, CatFilter, useCatRows, withCat } from "./CatFilter";
 import { lev } from "../lib/format";
 import { VENUE_LABEL, type Venue } from "../lib/venues";
+import type { Category } from "../lib/category";
 
 type Runner = {
   mint: string;
@@ -19,6 +21,7 @@ type Runner = {
   liq: number | null;
   rank: number | null;
   pump: boolean;
+  category: Category;
   market: { key: string; levUp: number | null; levDown: number | null } | null;
   listable: { id: string; venue: Venue; quote: string; tvl: number } | null;
   venue_hint: Venue | null;
@@ -42,10 +45,14 @@ const tier = (r: Runner) => (r.market ? 0 : r.listable ? 1 : 2);
 // lev() takes NaN as "—"; the server sends null for that case
 const levOf = (x: number | null) => lev(x === null ? NaN : x);
 
+const EMPTY: Runner[] = [];
+
 export function Runners() {
   const { data } = usePoll(fetchRunners, [], 30_000);
+  // Memes · Majors · Stonks over the whole feed; counts are what the feed holds
+  const { cat, setCat, counts, filtered } = useCatRows(data ?? EMPTY, (r) => r.category);
   if (!data || data.length === 0) return null;
-  const cards = data
+  const cards = filtered
     .map((r, i) => ({ r, i }))
     .sort((a, b) => tier(a.r) - tier(b.r) || a.i - b.i)
     .slice(0, MAX)
@@ -57,21 +64,26 @@ export function Runners() {
       <h2 className="meta runners-head">
         <span className="live-dot" aria-hidden />
         Runners · trending now
+        <CatFilter cat={cat} onChange={setCat} counts={counts} />
         <span className="right num">
           {tradable ? `${tradable} live` : ""}
           {tradable && listable ? " · " : ""}
           {listable ? (
-            <Link to="/new" className="runners-cta">
+            <Link to={withCat("/new", cat)} className="runners-cta">
               {listable} unlisted · be first →
             </Link>
           ) : null}
         </span>
       </h2>
-      <div className="runners-strip">
-        {cards.map((r) => (
-          <RunnerCard key={r.mint} r={r} />
-        ))}
-      </div>
+      {cards.length === 0 && cat ? (
+        <CatEmpty cat={cat} what="trending" />
+      ) : (
+        <div className="runners-strip">
+          {cards.map((r) => (
+            <RunnerCard key={r.mint} r={r} />
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -88,6 +100,11 @@ function RunnerCard({ r }: { r: Runner }) {
           ${r.symbol}
         </span>
         {r.pump && <span className="runner-pump">pump</span>}
+        {(r.category === "stonk" || r.category === "major") && (
+          <span className="cat-tag" data-cat={r.category}>
+            {r.category}
+          </span>
+        )}
         <Tweet text={text} path={path} />
       </div>
       <div className="runner-nums num">

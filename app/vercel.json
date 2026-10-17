@@ -1,4 +1,6 @@
 {
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
   "functions": {
     "api/og.ts": {
       "includeFiles": "api/_fonts/**",
@@ -33,13 +35,39 @@
       "maxDuration": 60,
       "memory": 1024
     },
+    "api/swap.ts": {
+      "maxDuration": 30,
+      "memory": 1024
+    },
     "api/winners.ts": {
       "includeFiles": "api/_data/**",
       "maxDuration": 60,
       "memory": 1024
+    },
+    "api/launch.ts": {
+      "maxDuration": 30
+    },
+    "api/war.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "api/legs.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "api/warbot.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "api/ngu-history.ts": {
+      "maxDuration": 60
     }
   },
   "rewrites": [
+    {
+      "source": "/c/:mint",
+      "destination": "https://wjvksitfxf9annmd.public.blob.vercel-storage.com/coins/:mint/meta.json"
+    },
     {
       "source": "/api",
       "destination": "/api/index"
@@ -47,6 +75,14 @@
     {
       "source": "/m/:key",
       "destination": "/api/page?key=:key"
+    },
+    {
+      "source": "/a",
+      "destination": "/api/page?war=action"
+    },
+    {
+      "source": "/w/:id",
+      "destination": "/api/page?war=:id"
     },
     {
       "source": "/p/:wallet",
@@ -67,6 +103,36 @@
     {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
+    }
+  ],
+  "redirects": [
+    {
+      "source": "/",
+      "has": [
+        {
+          "type": "host",
+          "value": "www.lastbidwins.fun"
+        }
+      ],
+      "destination": "/play",
+      "permanent": false
+    },
+    {
+      "source": "/",
+      "has": [
+        {
+          "type": "host",
+          "value": "lastbidwins.fun"
+        }
+      ],
+      "destination": "/play",
+      "permanent": false
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/warbot",
+      "schedule": "* * * * *"
     }
   ]
 }

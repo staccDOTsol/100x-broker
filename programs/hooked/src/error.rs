@@ -34,6 +34,23 @@ pub enum HookedError {
     /// create_market: the venue pool's mints are not {underlying, WSOL|USDC|USDT}, or the client's
     /// `underlying_is_token0` disagrees with which side the quote mint is on.
     UnderlyingFlagMismatch,
+    /// register_launch/boost: the Launch account is not the PDA for (market, side), or its stored
+    /// market/side disagree with the accounts passed.
+    InvalidLaunch,
+    /// register_launch: a Launch already exists for this (market, side).
+    LaunchExists,
+    /// register_launch: the pump BondingCurve is not owned by pump, has the wrong discriminator/length,
+    /// or is not quoted in MEME_MINT.
+    InvalidLaunchCurve,
+    /// register_launch: `BondingCurve.creator` is neither the signer nor the coin's SharingConfig PDA.
+    InvalidLaunchCreator,
+    /// register_launch: the SharingConfig is malformed, not final, or its shareholders do not match `mode`.
+    InvalidSharingConfig,
+    /// boost: a token account passed is not (mint, owner) the instruction requires.
+    InvalidLaunchTokenAccount,
+    /// create_market: a 2-obs market (`window_secs` < CKPT_SPACING_SECS) only ever reads stored Raydium
+    /// CLMM observations, so it needs kind 0 and a ring that has recorded within RING_STALE_SECS.
+    TwoObsNeedsLiveRing,
 }
 
 impl From<HookedError> for ProgramError {

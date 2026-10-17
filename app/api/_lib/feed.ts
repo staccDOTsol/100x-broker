@@ -2,16 +2,19 @@
 import { Connection, PublicKey, type ParsedInstruction, type ParsedTransactionWithMeta, type PartiallyDecodedInstruction } from "@solana/web3.js";
 import bs58 from "bs58";
 import { getAsset } from "./das.js";
+import { classify as classifyAsset } from "./category.js";
+import type { Category } from "../../src/lib/category.js";
 import { readMarketCard } from "./og.js";
 import { memo, peek } from "./memo.js";
 import { parsedTxs, recentSigs } from "./txcache.js";
+import { serverConnection } from "../../src/lib/upstream.js";
 
 // memo windows (ms): fresh / stale. Account lists and views refresh often; parsed history is incremental so it refreshes cheaply.
 const LIST_TTL = 5_000, LIST_STALE = 30_000;
 const FEED_TTL = 5_000, FEED_STALE = 60_000;
 const BOARD_TTL = 15_000, BOARD_STALE = 120_000;
 
-const PROGRAM_ID = new PublicKey(process.env.VITE_PROGRAM_ID ?? "T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb");
+const PROGRAM_ID = new PublicKey(process.env.VITE_PROGRAM_ID ?? "9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6");
 const DBC = "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN";
 const RFSTACC = "pSYRpDqr847kB2nD5ZhjcPsHLV2ZpUxweXm1MwiSTcc";
 const MARKET_LEN = 1008;
@@ -21,13 +24,16 @@ const CLAIM_DISC = Buffer.from([84, 191, 71, 50, 9, 162, 55, 193]);
 const conn = () => {
   const u = process.env.HELIUS_RPC_URL;
   if (!u) throw new Error("HELIUS_RPC_URL not configured");
-  return new Connection(u, "confirmed");
+  return serverConnection();
 };
 const pk = (d: Buffer, o: number) => new PublicKey(d.subarray(o, o + 32)).toBase58();
 
 export type Ctx = {
   key: string;
   ticker: string;
+  /** The coin under the market and its category (meme | major | stonk | stable | other, src/lib/category.ts). */
+  underlying: string;
+  category: Category;
   mints: [string, string];
   decimals: [number, number];
   vaults: [string, string];
@@ -44,9 +50,12 @@ export const marketCtx = (key: PublicKey): Promise<Ctx> =>
     const [pB, pR, mB, mR, opool] = await c.getMultipleAccountsInfo([new PublicKey(pk(d, 232)), new PublicKey(pk(d, 264)), new PublicKey(pk(d, 8)), new PublicKey(pk(d, 40)), new PublicKey(pk(d, 104))]);
     const underlying = pk(opool!.data, d[489] ? 73 : 105);
     const asset = await getAsset(underlying).catch(() => null);
+    const category = await classifyAsset({ mint: underlying, symbol: asset?.symbol, name: asset?.name }).catch((): Category => "other");
     const v: Ctx = {
       key: key.toBase58(),
       ticker: asset?.symbol ?? underlying.slice(0, 4),
+      underlying,
+      category,
       mints: [pk(d, 8), pk(d, 40)],
       decimals: [mB!.data[44], mR!.data[44]],
       vaults: [pk(d, 168), pk(d, 200)],
@@ -172,7 +181,7 @@ export const allMarkets = (): Promise<PublicKey[]> =>
   });
 
 // ---------- plumbing, not people ----------
-const DN_PROGRAM = new PublicKey("2ZbjE44nSh3AmpREg4sdNMViBLAzAEtFKYDn1XdqMzEj");
+const DN_PROGRAM = new PublicKey("63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU");
 /** Signs every vault rebalance, so it would top any activity list on its own. */
 const KEEPER = process.env.DN_KEEPER ?? "EGa3ng1xcuB5X9tkK7czYczhD4PpAYAJF52Vo9F2Cn7";
 /** The keeper plus every dnvault PDA and its SOL sub-account: they hold DOWN and trade it, but they are not wallets. 5 min fresh,
@@ -410,13 +419,16 @@ export type Active = {
   top: { market: string; ticker: string; side: 0 | 1; quote: string } | null;
 };
 
+/** A tx that touches a vault is vault plumbing (keeper rebalance, park-and-deploy hedge) whoever paid for it. Every caller of
+ *  marketEventsSince must pass this same filter: the per-market event buffer is shared and stores what the filter let through. */
+const plumbingOf = (bots: Set<string>) => (tx: ParsedTransactionWithMeta) => tx.transaction.message.accountKeys.some((k) => bots.has(k.pubkey.toBase58()));
+
 /** Who actually traded in the window, closed positions included — the bags board only sees what is still held. */
 export const activeWallets = (hours = 24): Promise<Active[]> => memo(`feed:active:${hours}`, BOARD_TTL, 300_000, () => loadActiveWallets(hours));
 async function loadActiveWallets(hours: number): Promise<Active[]> {
   const since = Math.floor(Date.now() / 1000) - hours * 3600;
   const [markets, bots] = await Promise.all([allMarkets(), botAddresses()]);
-  // a tx that touches a vault is vault plumbing (keeper rebalance, park-and-deploy hedge) whoever paid for it
-  const plumbing = (tx: ParsedTransactionWithMeta) => tx.transaction.message.accountKeys.some((k) => bots.has(k.pubkey.toBase58()));
+  const plumbing = plumbingOf(bots);
   const evs = (await Promise.all(markets.map((m) => marketEventsSince(m, since, plumbing).catch(() => [] as Ev[])))).flat();
   type Acc = { in: bigint; out: bigint; trades: number; mk: Set<string>; last: number; tops: Map<string, { ticker: string; side: 0 | 1; q: bigint }> };
   const agg = new Map<string, Acc>();
@@ -453,4 +465,51 @@ async function loadActiveWallets(hours: number): Promise<Active[]> {
   const vol = (r: Active) => BigInt(r.in) + BigInt(r.out);
   // ranked by volume moved (in + out): the number that pays the pots, not the click count
   return rows.sort((x, y) => (vol(y) > vol(x) ? 1 : vol(y) < vol(x) ? -1 : 0) || y.trades - x.trades).slice(0, 20);
+}
+
+/** When a market was listed: the blockTime of the oldest signature on its account. That never changes, so it is kept a day fresh
+ *  and a week stale; null when the account's history is deeper than BIRTH_PAGES pages (the board then sorts it as the oldest). */
+const BIRTH_PAGES = 20;
+export const marketBirth = (key: PublicKey): Promise<number | null> =>
+  memo(`feed:birth:${key.toBase58()}`, 86_400_000, 7 * 86_400_000, async () => {
+    const c = conn();
+    let before: string | undefined;
+    for (let i = 0; i < BIRTH_PAGES; i++) {
+      const page = await c.getSignaturesForAddress(key, { limit: 1000, before });
+      if (!page.length) return null;
+      if (page.length < 1000) return page[page.length - 1].blockTime ?? null;
+      before = page[page.length - 1].signature;
+    }
+    return null;
+  });
+
+/** One market's trading over a window. `vol` is r-fstacc raw (buys + sells + cash-outs, vault plumbing and bots excluded, the same
+ *  rule as activeWallets), null when its history could not be read this pass. `born` is marketBirth. */
+export type MarketStat = { market: string; vol: string | null; trades: number; traders: number; last: number | null; born: number | null };
+
+/** Per-market volume, trade count and listing time: what the board and the market switcher sort by (volume · oldest · newest). */
+export const marketStats = (hours = 24): Promise<MarketStat[]> => memo(`feed:mstats:${hours}`, BOARD_TTL, 300_000, () => loadMarketStats(hours));
+async function loadMarketStats(hours: number): Promise<MarketStat[]> {
+  const since = Math.floor(Date.now() / 1000) - hours * 3600;
+  const [markets, bots] = await Promise.all([allMarkets(), botAddresses()]);
+  const plumbing = plumbingOf(bots);
+  return Promise.all(
+    markets.map(async (m): Promise<MarketStat> => {
+      const [evs, born] = await Promise.all([marketEventsSince(m, since, plumbing).catch(() => null), marketBirth(m).catch(() => null)]);
+      if (!evs) return { market: m.toBase58(), vol: null, trades: 0, traders: 0, last: null, born };
+      let vol = 0n;
+      let trades = 0;
+      let last: number | null = null;
+      const who = new Set<string>();
+      for (const e of evs) {
+        if (e.ts < since || bots.has(e.actor)) continue;
+        if (e.kind !== "buy" && e.kind !== "sell" && e.kind !== "redeem") continue;
+        vol += BigInt(e.quote ?? 0);
+        trades++;
+        who.add(e.actor);
+        last = Math.max(last ?? 0, e.ts);
+      }
+      return { market: m.toBase58(), vol: vol.toString(), trades, traders: who.size, last, born };
+    }),
+  );
 }

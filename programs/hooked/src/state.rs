@@ -205,9 +205,76 @@ impl BurnState {
     }
 }
 
+pub const LAUNCH_DISC: [u8; 8] = *b"hooklnch";
+
+/// One companion pump.fun coin of a market (UP = bull side, DOWN = bear side). PDA
+/// ["launch", market, side u8]; `sol_bump` is for the data-less, system-owned PDA
+/// ["launch-sol", market, side] that briefly holds unwrapped SOL inside `boost`.
+#[repr(C)]
+pub struct Launch {
+    pub disc: [u8; 8],
+    pub market: Address,
+    pub pump_mint: Address,
+    /// The lister: `register_launch` signer, paid LAUNCH_LISTER_BPS in mode 1.
+    pub creator: Address,
+    pub side: u8,
+    pub mode: u8,
+    pub bump: u8,
+    pub sol_bump: u8,
+    pub _pad: [u8; 4],
+    /// Lifetime MEME sold for the vault.
+    pub total_sold: u64,
+    /// Lifetime MEME burned.
+    pub total_burned: u64,
+    /// Lifetime MEME paid to the lister (mode 1 only).
+    pub total_lister: u64,
+    /// Lifetime r-freestacc minted into the side's vault.
+    pub total_boost: u64,
+}
+
+impl Launch {
+    pub const LEN: usize = core::mem::size_of::<Launch>();
+
+    pub fn from_bytes_mut(data: &mut [u8]) -> Result<&mut Launch, ProgramError> {
+        if data.len() != Self::LEN || data[..8] != LAUNCH_DISC {
+            return Err(HookedError::InvalidLaunch.into());
+        }
+        Ok(unsafe { &mut *(data.as_mut_ptr() as *mut Launch) })
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Result<&Launch, ProgramError> {
+        if data.len() != Self::LEN || data[..8] != LAUNCH_DISC {
+            return Err(HookedError::InvalidLaunch.into());
+        }
+        Ok(unsafe { &*(data.as_ptr() as *const Launch) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_layout() {
+        assert_eq!(Launch::LEN, 144);
+        assert_eq!(core::mem::align_of::<Launch>(), 8);
+        let l = unsafe { core::mem::zeroed::<Launch>() };
+        let base = &l as *const Launch as usize;
+        assert_eq!(&l.market as *const Address as usize - base, 8);
+        assert_eq!(&l.pump_mint as *const Address as usize - base, 40);
+        assert_eq!(&l.creator as *const Address as usize - base, 72);
+        assert_eq!(&l.side as *const u8 as usize - base, 104);
+        assert_eq!(&l.mode as *const u8 as usize - base, 105);
+        assert_eq!(&l.bump as *const u8 as usize - base, 106);
+        assert_eq!(&l.sol_bump as *const u8 as usize - base, 107);
+        assert_eq!(&l.total_sold as *const u64 as usize - base, 112);
+        assert_eq!(&l.total_boost as *const u64 as usize - base, 136);
+        let mut bytes = [0u8; Launch::LEN];
+        assert!(Launch::from_bytes(&bytes).is_err());
+        bytes[..8].copy_from_slice(&LAUNCH_DISC);
+        assert!(Launch::from_bytes(&bytes).is_ok());
+        assert!(Launch::from_bytes(&bytes[..Launch::LEN - 1]).is_err());
+    }
 
     /// The on-chain markets (e.g. GwzRwcPYSojZiNc4tC4eoLSLD7htk3akWA7qtG68zyHh, 1008 bytes, read
     /// 2026-10-13) were written with the pre-kind layout: three pad bytes at 493..496, all zero.
