@@ -15,12 +15,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   let image = `${origin}/api/og`;
   // canonical URL: the public path without the rewrite's own params (key/owner/wallet)
   const u = new URL(req.url ?? "/", origin);
-  for (const k of ["key", "owner", "wallet", "vault", "meta"]) u.searchParams.delete(k); // keep ref + s: X keys its cache on this URL
+  for (const k of ["key", "owner", "wallet", "vault", "meta", "ngu"]) u.searchParams.delete(k); // keep ref + s: X keys its cache on this URL
   const url = u.toString();
   const ref = typeof req.query.ref === "string" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(req.query.ref) ? req.query.ref : null;
   const via = ref ? ` Shared by ${ref.slice(0, 4)}…${ref.slice(-4)}.` : "";
   try {
-    if (req.query.meta) {
+    if (req.query.ngu) {
+      // /ngu — the stacSOL successor; static card
+      title = "NGU — Number Go Up: staked SOL whose SOL rate only goes up";
+      desc = `Every transfer pays a tax. A permissionless crank burns half, buys Fr28 with a sixth and adds the rest to liquidity the program owns forever. Volume is the yield.${via}`;
+      image = `${origin}/ngu/og.png`;
+    } else if (req.query.meta) {
       // /meta — the curated list; the card is live, so stamp a 5-minute bucket to get past X's image cache
       title = "What's spicy right now — 100x.broker";
       desc = `You long it? Long it. Short? Short it. Don't want to be long or short but think it's gonna be a wild ride? Park it. ${META.filter((p) => p.market).map((p) => `$${p.ticker} ${p.side === "VAULT" ? "vault" : p.side}`).join(" · ")}.${via}`;

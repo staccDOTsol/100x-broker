@@ -22,6 +22,8 @@ import MetaPage from "./pages/Meta";
 import ArenaPage from "./pages/Arena";
 import WinnersPage from "./pages/Winners";
 import { NETWORK, RPC_URL } from "./config";
+import { NguHero } from "./components/NguHero";
+import NguPage from "./pages/Ngu";
 
 type Theme = "auto" | "light" | "dark";
 function useTheme(): [Theme, () => void] {
@@ -223,6 +225,7 @@ export default function App() {
                 <span>100x.broker{loc.pathname === "/" ? "" : loc.pathname}</span>
                 <span>Up or down · no liquidations · settles in SOL</span>
               </div>
+              <NguHero />
               <main>
                 <Routes>
                   <Route path="/" element={<Board />} />
@@ -235,6 +238,7 @@ export default function App() {
                   <Route path="/meta" element={<MetaPage />} />
                   <Route path="/arena" element={<ArenaPage />} />
                   <Route path="/winners" element={<WinnersPage />} />
+                  <Route path="/ngu" element={<NguPage />} />
                   <Route
                     path="*"
                     element={

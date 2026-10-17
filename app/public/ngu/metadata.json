@@ -1,0 +1,10 @@
+{
+  "name": "Number Go Up",
+  "symbol": "NGU",
+  "description": "Staked SOL whose SOL redemption rate only goes up. Every transfer pays a tax; a permissionless on-chain crank burns half of it, buys Fr28 with a sixth, and adds the rest to liquidity the program owns forever. Mint and redeem at the pool rate through its stake pool. Not financial advice.",
+  "image": "https://100x.broker/ngu/logo.png",
+  "external_url": "https://100x.broker/ngu",
+  "extensions": {
+    "website": "https://100x.broker/ngu"
+  }
+}

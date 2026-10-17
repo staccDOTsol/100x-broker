@@ -61,6 +61,10 @@
       "destination": "/api/page?meta=1"
     },
     {
+      "source": "/ngu",
+      "destination": "/api/page?ngu=1"
+    },
+    {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }
