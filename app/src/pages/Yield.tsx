@@ -292,9 +292,24 @@ export function LopsidedNote({ r, ticker }: { r: Row; ticker: string }) {
   const { cover } = vaultNumbers(r);
   const starved = r.x.dStar > 0n && r.x.pot <= r.x.dStar; // the whole DOWN pot is smaller than the hedge the vault needs: nothing to buy
   if (r.x.dStar === 0n && r.x.xTotal === 0n) {
+    // nothing in the pool yet. Say why: an empty vault has nothing to deploy, and the keeper skips anything at or under
+    // RESERVE + MIN_DEPLOY (0.03 + 0.02 SOL, api/_lib/dnplan.ts); only above that is it really waiting on the next pass
+    const parked = Number(r.x.nav) / 1e9;
     return (
       <p className="warn lopsided" role="note">
-        <b>Not deployed yet.</b> Keeper's next pass.
+        {parked <= 0 ? (
+          <>
+            <b>Empty vault.</b> Nothing's parked yet, so there's nothing to deploy. Park SOL below; the keeper puts it to work once the vault holds over 0.05 SOL.
+          </>
+        ) : parked <= 0.05 ? (
+          <>
+            <b>Parked {parked.toFixed(3)} SOL.</b> Too small to deploy yet: the keeper starts once the vault holds over 0.05 SOL.
+          </>
+        ) : (
+          <>
+            <b>Not deployed yet.</b> {parked.toFixed(3)} SOL goes into the pool on the keeper's next pass.
+          </>
+        )}
       </p>
     );
   }

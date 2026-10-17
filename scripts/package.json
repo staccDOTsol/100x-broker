@@ -11,7 +11,13 @@
   },
   "dependencies": {
     "@meteora-ag/dynamic-bonding-curve-sdk": "1.5.13",
+    "@orca-so/whirlpools": "8.0.1",
+    "@orca-so/whirlpools-client": "7.0.0",
+    "@orca-so/whirlpools-core": "3.1.1",
+    "@pump-fun/pump-sdk": "^4.0.0",
+    "@pump-fun/pump-swap-sdk": "^2.1.0",
     "@raydium-io/raydium-sdk-v2": "^0.2.74-alpha",
+    "@solana/kit": "5.5.1",
     "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.99.0",
     "bn.js": "^5.2.5"

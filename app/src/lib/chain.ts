@@ -17,14 +17,44 @@ import {
   getDeltaAmountBaseUnsigned,
 } from "@meteora-ag/dynamic-bonding-curve-sdk";
 import BN from "bn.js";
-import { ALT_AUTHORITY, ALT_FALLBACK, LEVERAGE, PROGRAM_ID, RFSTACC, RPC_URL } from "../config.js";
-import { type MarketKeys, cu, settleBeginIx, settleEndIx, settleSwapIx, sideAccounts } from "./hooked.js";
+import { ALT_AUTHORITY, ALT_FALLBACK, DEFAULT_WINDOW_SECS, LEVERAGE, PROGRAM_ID, RETIRED_MARKETS, RFSTACC, RPC_URL } from "../config.js";
+import { failoverFetch } from "./upstream.js";
+import { type MarketKeys, cu, decodeLaunch, launchPda, settleBeginIx, settleEndIx, settleSwapIx, sideAccounts } from "./hooked.js";
 import { MARKET_ORACLE_KIND, type OracleQuote, type Venue, pumpSwapPoolOf, quoteSymbolOf, slotMints, slotSpotTick, venueOfKind } from "./venues.js";
+import { categoryOf, type Category } from "./category.js";
 
 export { quoteSymbolOf, type OracleQuote };
 
-export const conn = new Connection(RPC_URL, { commitment: "confirmed", disableRetryOnRateLimit: false });
+// browser: /api/rpc. Server (swap legs, listings, plans): Flux first for live state, Helius for history, each backing the other.
+export const conn =
+  typeof window === "undefined"
+    ? new Connection(RPC_URL, { commitment: "confirmed", fetch: failoverFetch as never, disableRetryOnRateLimit: true })
+    : new Connection(RPC_URL, { commitment: "confirmed", disableRetryOnRateLimit: false });
 export const dbc = DynamicBondingCurveClient.create(conn, "confirmed");
+
+// A listing sends the curve config and both curves in one batch, but the curve SDK reads the config from chain while it
+// builds each curve ("Pool config not found for virtual pool"). Configs registered with withPendingConfig build against
+// the shape every 100x config has (quote r-fstacc, a classic SPL mint) until they land. createPoolWithTransferHook reads
+// only these two fields. One permanent wrapper over a pending set, so concurrent listings on the server can't unhook
+// each other.
+const pendingConfigs = new Set<string>();
+{
+  const creator = dbc.creator as unknown as { getPoolConfigForNewPool: (c: PublicKey) => Promise<unknown> };
+  const original = creator.getPoolConfigForNewPool.bind(creator);
+  creator.getPoolConfigForNewPool = async (c: PublicKey) => {
+    if (pendingConfigs.has(c.toBase58()) && !(await conn.getAccountInfo(c))) return { quoteMint: RFSTACC, quoteTokenFlag: 0 };
+    return original(c);
+  };
+}
+export async function withPendingConfig<T>(config: PublicKey, build: () => Promise<T>): Promise<T> {
+  const k = config.toBase58();
+  pendingConfigs.add(k);
+  try {
+    return await build();
+  } finally {
+    pendingConfigs.delete(k);
+  }
+}
 
 const MARKET_LEN = 1008;
 const ONE_Q63 = 1n << 63n;
@@ -92,7 +122,7 @@ export async function listMarketKeys(): Promise<PublicKey[]> {
     // "hookmkt1" in base58: some upstreams (FluxRPC) reject base64 memcmp filters
     filters: [{ dataSize: MARKET_LEN }, { memcmp: { offset: 0, bytes: "JU9tGcfh7on" } }],
   });
-  return res.map((r) => r.pubkey);
+  return res.map((r) => r.pubkey).filter((k) => !RETIRED_MARKETS.has(k.toBase58()));
 }
 
 /** Token-2022 TokenMetadata extension (type 19): name/symbol/uri. */
@@ -206,6 +236,9 @@ export type MarketView = {
   keys: MarketKeys;
   ticker: string;
   underlyingMint: string;
+  /** Memes · Majors · Stonks (src/lib/category.ts). From the underlying mint + the pair's derived name here; the server
+   *  snapshot (api/_lib/views.ts) upgrades `other` with Jupiter tags and the mint's issuer authorities. */
+  category: Category;
   side: [SideView, SideView];
   oracle: {
     series: { ts: number; price: number }[];
@@ -219,6 +252,8 @@ export type MarketView = {
   };
   /** Transfer the next poke/transfer would make, from `payer` side. */
   pending: { payer: 0 | 1; amount: bigint; keep: number } | null;
+  /** Companion pump.fun coins ($TICKERUP / $TICKERDN, quoted in $100XBRO): the pump mint per side once its Launch PDA exists. */
+  launches: { up: PublicKey | null; down: PublicKey | null };
 };
 export type SideView = {
   name: string;
@@ -243,10 +278,13 @@ export async function loadMarketView(key: PublicKey): Promise<MarketView | null>
   const a = decodeMarket(key, mi.data);
   const accts = await conn.getMultipleAccountsInfo([
     a.vaultBull, a.vaultBear, a.poolBull, a.poolBear, a.bullMint, a.bearMint, a.baseVaultBull, a.baseVaultBear,
-    a.oracleObs, a.oraclePool,
+    a.oracleObs, a.oraclePool, launchPda(key, 0), launchPda(key, 1),
   ]);
-  const [vB, vR, pB, pR, mB, mR, bvB, bvR, obs, opool] = accts;
+  const [vB, vR, pB, pR, mB, mR, bvB, bvR, obs, opool, lUp, lDn] = accts;
   if (!vB || !vR || !pB || !pR || !mB || !mR || !bvB || !bvR || !obs || !opool) return null;
+  // the two Launch PDAs ride in the same batch: present => that side has a pump companion
+  const launchMint = (l: typeof lUp, side: 0 | 1) => (l && l.owner.equals(PROGRAM_ID) ? decodeLaunch(launchPda(key, side), l.data)?.mint ?? null : null);
+  const launches = { up: launchMint(lUp, 0), down: launchMint(lDn, 1) };
   const cfg = await dbc.state.getPoolConfig(pk(pB.data, 72));
   const startSqrt = cfg ? BigInt(cfg.sqrtStartPrice.toString()) : 0n;
   const keys: MarketKeys = {
@@ -334,12 +372,15 @@ export async function loadMarketView(key: PublicKey): Promise<MarketView | null>
       pending = { payer, keep, amount: BigInt(Math.floor(Number(vaults[payer]) * (1 - keep))) };
     }
   }
+  // the UP side is named `${underlying name} 100x UP` / `${SYMBOL}UP` at listing, so the pair carries the coin's metadata
   const ticker = side[0].name.replace(/\s*100x\s*UP$/i, "") || side[0].symbol;
+  const category = categoryOf({ mint: underlyingMint, name: ticker, symbol: side[0].symbol.replace(/UP$/i, "") });
   return {
     acct: a,
     keys,
     ticker,
     underlyingMint,
+    category,
     side,
     oracle: {
       series,
@@ -351,6 +392,7 @@ export async function loadMarketView(key: PublicKey): Promise<MarketView | null>
       venue,
     },
     pending,
+    launches,
   };
 }
 
@@ -518,8 +560,23 @@ export class TxFailed extends Error {
   }
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** "Blockhash not found" at preflight usually means the blockhash came from a node a slot or two ahead of the one running the
+ *  check. That node catches up in about a second, so the same signed bytes are sent again (it is the same signature, so a send
+ *  can never land twice). A blockhash that really expired keeps failing and the error is thrown after the last try. */
+export async function sendFresh<T>(send: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await send();
+    } catch (e) {
+      // the wording varies by node: "Blockhash not found" in the message, or err "BlockhashNotFound" in the preflight data
+      const said = e instanceof Error ? `${e.message} ${JSON.stringify(e)}` : String(e);
+      if (attempt >= 4 || !/blockhash ?not ?found/i.test(said)) throw e;
+      await sleep(900);
+    }
+  }
+}
 export async function sendRaw(raw: Uint8Array): Promise<string> {
-  const sig = await conn.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 3, preflightCommitment: "confirmed" });
+  const sig = await sendFresh(() => conn.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 3, preflightCommitment: "confirmed" }));
   const until = Date.now() + 75_000;
   while (Date.now() < until) {
     const st = (await conn.getSignatureStatuses([sig])).value[0];
@@ -548,6 +605,16 @@ export function oracleHealth(obs: Uint8Array, nowTs = Math.floor(Date.now() / 10
   // a dead ring is fine: the market samples the pool's tick itself (see RING_STALE_SECS)
   return { ...h, ok: h.observations >= 1, sampled: h.lastAgeSecs > RING_STALE_SECS };
 }
+
+/** 1 s = 2-observation TWAP: the window starts at the previous stored point, which is all it takes to defeat a
+ *  same-transaction push. Only safe where the market reads a venue's own price accumulator, which today means a Raydium CLMM
+ *  ring that is still recording. On a dead ring or a sampled venue the program extends the newest point with the pool's live
+ *  tick, so a short window there is spot price; those keep DEFAULT_WINDOW_SECS until the program reads venue accumulators
+ *  (programs/hooked/TWAP-2OBS.md). */
+export const TWO_OBS_WINDOW_SECS = 1;
+export const twoObsSafe = (venue: string, health: OracleHealth | null) => venue === "clmm" && !!health && !health.sampled;
+export const defaultWindowSecs = (venue: string, health: OracleHealth | null) =>
+  twoObsSafe(venue, health) ? TWO_OBS_WINDOW_SECS : DEFAULT_WINDOW_SECS;
 
 /** Markets already listed on a given oracle_obs slot (CLMM observation ring, PumpSwap base ATA, CPMM token-0 vault, Meteora
  *  pool), any window. */

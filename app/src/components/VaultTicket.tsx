@@ -2,7 +2,7 @@
 // (park + deploy, unpark straight to SOL); the plain in-kind paths stay as quiet escape hatches.
 import { useEffect, useMemo, useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { useSend } from "../hooks";
+import { humanError, useSend } from "../hooks";
 import { usePrices } from "../hooks/price";
 import { useToasts } from "../components/Toasts";
 import { toV0 } from "../lib/chain";
@@ -60,8 +60,8 @@ export function VaultTicket({ view, ticker, onDone, className = "" }: { view: Va
   };
   const fail = (e: unknown) => {
     setBusy(false);
-    const msg = e instanceof Error ? e.message : String(e);
-    setErr(/reject|cancel|denied/i.test(msg) ? "You closed the wallet. Nothing moved." : msg.length > 160 ? msg.slice(0, 160) + "…" : msg);
+    const msg = humanError(e);
+    setErr(/reject|cancel|denied/i.test(msg) ? "You closed the wallet. Nothing moved." : msg.length > 220 ? msg.slice(0, 220) + "…" : msg);
   };
 
   async function parkDeploy() {
@@ -71,9 +71,16 @@ export function VaultTicket({ view, ticker, onDone, className = "" }: { view: Va
     setSteps([{ label: "Planning the deploy", status: "sending" }]);
     try {
       const plan = await planZapIn(publicKey, view, raw);
-      await zapIn(publicKey, plan, wallet, setSteps);
-      if (plan.note) toasts.push({ s: "ok", title: "Parked", body: plan.note });
+      const out = await zapIn(publicKey, plan, wallet, setSteps);
       setInput("");
+      if (out.held) {
+        // parked, deploy refused for now: say so plainly, and refresh so the receipts and the vault show the parked SOL
+        setBusy(false);
+        onDone();
+        toasts.push({ s: "ok", title: "Parked, not deployed yet", body: out.held, ttl: 12_000 });
+        return;
+      }
+      if (plan.note) toasts.push({ s: "ok", title: "Parked", body: plan.note });
       finish("Park & deploy");
     } catch (e) {
       fail(e);
@@ -216,7 +223,7 @@ export function VaultTicket({ view, ticker, onDone, className = "" }: { view: Va
           {steps.map((st, i) => (
             <li key={i} className={`st ${st.status}`}>
               <span className="glyph" aria-hidden>
-                {st.status === "done" ? "✓" : st.status === "failed" ? "✕" : st.status === "sending" ? "⟳" : st.status === "signing" ? "✎" : "·"}
+                {st.status === "done" ? "✓" : st.status === "failed" ? "✕" : st.status === "held" ? "⏸" : st.status === "sending" ? "⟳" : st.status === "signing" ? "✎" : "·"}
               </span>
               <span className="label">{st.label}</span>
               {st.sig && (
@@ -224,6 +231,7 @@ export function VaultTicket({ view, ticker, onDone, className = "" }: { view: Va
                   tx ↗
                 </a>
               )}
+              {st.note && <span className="meta">{st.note}</span>}
               {st.error && <span className="err">{st.error}</span>}
             </li>
           ))}

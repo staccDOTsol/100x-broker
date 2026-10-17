@@ -17,8 +17,9 @@ import {
 import { classify as classifyVault, type DnEv } from "../dnfeed.js";
 import { listVaults, type Vault } from "../../src/lib/dn.js";
 import { poolState } from "../../src/lib/zap.js";
+import { serverConnection } from "../../src/lib/upstream.js";
 
-const DN_PROGRAM = "2ZbjE44nSh3AmpREg4sdNMViBLAzAEtFKYDn1XdqMzEj";
+const DN_PROGRAM = "63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU";
 const MEMO_TAG = "100x.broker 0/20";
 const FOLLOW_SECS = 900; // an unpark's zap-out lands within minutes of the in-kind withdraw
 
@@ -70,7 +71,7 @@ export const emptyState = (): WinState => ({
 const conn = () => {
   const u = process.env.HELIUS_RPC_URL;
   if (!u) throw new Error("HELIUS_RPC_URL not configured");
-  return new Connection(u, "confirmed");
+  return serverConnection();
 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function retry<T>(f: () => Promise<T>, tries = 8): Promise<T> {

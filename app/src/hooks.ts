@@ -55,10 +55,30 @@ const DN_ERRORS: Record<number, string> = {
   14: "the vault refused: the pool price is too far from the market's TWAP right now; try again in a few minutes",
   16: "nothing to unpark: no receipts in this wallet",
 };
+/** Stars War (Hbu4EByG…, lastbidwins.fun) program errors, 6000 + n, in plain words. */
+const WAR_ERRORS: Record<number, string> = {
+  6005: "This war is over. Tap again to play the next one.",
+  6006: "The clock ran out before your bid landed. Tap again to play the next war.",
+  6007: "The clock hasn't run out yet, so this war can't be settled.",
+  6008: "Nobody has bid in this war yet.",
+  6009: "Already paid out.",
+  6010: "That's under this war's minimum bid. Tap again for the current minimum.",
+  6011: "Someone bid before yours landed, so yours wasn't the highest anymore. Tap Try again to top them.",
+  6012: "No keys to burn.",
+  6013: "Nothing to claim yet. Your keys earn when someone bids after you.",
+  6014: "This wallet can't do that.",
+  6016: "Wrong kind of bid for this war (it's a token war).",
+  6017: "Wrong kind of bid for this war (it's a SOL war).",
+  6018: "Wrong token for this war.",
+  6019: "This war hasn't started yet.",
+};
 export function humanError(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
   if (/reject|denied|cancel/i.test(msg)) return "You blinked. Wallet says no.";
-  const dn = msg.match(/2ZbjE44nSh3AmpREg4sdNMViBLAzAEtFKYDn1XdqMzEj failed: custom program error: 0x([0-9a-f]+)/i);
+  // preflight failures carry the program's line in their logs rather than the message
+  const war = `${msg} ${JSON.stringify(e)}`.match(/Hbu4EByGc17GxHYyiazxDMvtL6VvKxV4aRsZW95uzfu7 failed: custom program error: 0x([0-9a-f]+)/i);
+  if (war && WAR_ERRORS[parseInt(war[1], 16)]) return WAR_ERRORS[parseInt(war[1], 16)];
+  const dn = msg.match(/63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU failed: custom program error: 0x([0-9a-f]+)/i);
   if (dn && DN_ERRORS[parseInt(dn[1], 16)]) return DN_ERRORS[parseInt(dn[1], 16)];
   const custom = (e instanceof TxFailed ? JSON.stringify(e.detail) : msg).match(/(?:Custom"?:?\s*|0x)(\d+|[0-9a-f]+)/i);
   if (custom) {
@@ -67,6 +87,8 @@ export function humanError(e: unknown): string {
     if (n === 1) return "Not enough in the wallet. Even at 100×.";
   }
   if (/insufficient/i.test(msg)) return "Not enough in the wallet. Even at 100×.";
+  // still unseen after every retry: the transaction sat too long before it was signed
+  if (/blockhash ?not ?found/i.test(`${msg} ${JSON.stringify(e)}`)) return "That took too long to sign and went stale. Tap again for a fresh one.";
   return msg.length > 160 ? msg.slice(0, 160) + "…" : msg;
 }
 

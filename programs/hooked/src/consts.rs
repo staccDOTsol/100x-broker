@@ -47,9 +47,19 @@ pub const MEME_MINT: Address = Address::from_str_const(match option_env!("HOOKED
 });
 pub const PUMP: Address = Address::from_str_const("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
 pub const PUMPSWAP: Address = Address::from_str_const("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
+/// Pump Fees program: owns `SharingConfig` (creator-fee split) and `fee_config`.
+pub const PUMP_FEES: Address = Address::from_str_const("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
 pub const WSOL: Address = Address::from_str_const("So11111111111111111111111111111111111111112");
 /// r-freestacc's Sanctum stake pool: rate = total_lamports / pool_token_supply.
 pub const STAKE_POOL: Address = Address::from_str_const("SzoSoRxsrL9sbFcwpbjbH5bRrzuvFtuytZTeuqZCfQ6");
+/// Sanctum's SPL-stake-pool fork that owns STAKE_POOL (same instruction set/indices as SPL stake pool).
+pub const STAKE_POOL_PROGRAM: Address = Address::from_str_const("SP12tWFxD9oJsVWNavTTBZvMbA6gkAmxtVgxdqvyvhY");
+/// SPL stake pool `DepositSol` (verified on live SzoSo… txs: tag 14, 9 data bytes, 10 accounts).
+pub const SP_DEPOSIT_SOL: u8 = 14;
+/// StakePool: account_type u8, 3 pubkeys, withdraw bump, validator_list, then these.
+pub const SP_RESERVE_STAKE: usize = 130;
+pub const SP_POOL_MINT: usize = 162;
+pub const SP_MANAGER_FEE: usize = 194;
 pub const SP_TOTAL_LAMPORTS: usize = 258;
 pub const SP_POOL_TOKEN_SUPPLY: usize = 266;
 /// Bounty paid over the venue's own sell quote to whoever brings MEME to burn.
@@ -59,10 +69,57 @@ pub const MAX_BURN_SHARE_BPS: u128 = 500;
 pub const BURN_COOLDOWN_SECS: i64 = 60;
 pub const PUMP_FEE_BPS: u128 = 100;
 pub const PUMPSWAP_FEE_BPS: u128 = 30;
-// pump.fun BondingCurve: disc 8 | virtual_token u64 | virtual_sol u64 | real_token | real_sol | supply | complete u8 | creator
+// pump.fun BondingCurve (pump-public-docs idl/pump.json, Anchor/Borsh; verified on the live SOL-quoted
+// $100XBRO curve Fq52En… and the pump-coin-quoted curve 1ELNXj…, both 166 bytes):
+// disc 8 | virtual_token_reserves u64 | virtual_quote_reserves u64 | real_token_reserves | real_quote_reserves |
+// token_total_supply | complete bool | creator 32 | is_mayhem_mode bool | is_cashback_coin bool |
+// quote_mint 32 (all-zero = SOL) | creator_fee_bps u64 | can_edit_creator_fee bool | is_holder_reward bool |
+// creator_fee u64 | protocol_fees u64 | depth u8 | initial_virtual_quote_reserves u64 |
+// post_complete_base_out u64 | post_complete_quote_in u64
+pub const BC_DISC: [u8; 8] = [23, 183, 248, 55, 96, 216, 172, 96];
 pub const BC_VIRTUAL_TOKEN: usize = 8;
 pub const BC_VIRTUAL_SOL: usize = 16;
 pub const BC_COMPLETE: usize = 48;
+pub const BC_CREATOR: usize = 49;
+pub const BC_QUOTE_MINT: usize = 83;
+pub const BC_CREATOR_FEE_BPS: usize = 115;
+pub const BC_DEPTH: usize = 141;
+/// Full create_v2-era layout; every coin paired with a pump coin is at least this long.
+pub const BC_LEN_V2: usize = 166;
+
+// Pump Fees SharingConfig (idl/pump_fees.json; verified on live 11FDP3Dj…, 1024 bytes):
+// disc 8 | bump u8 | version u8 | status u8 (1 = Active) | mint 32 | admin 32 | admin_revoked bool |
+// shareholders Vec<{address 32, share_bps u16}> (u32 len prefix)
+pub const SC_DISC: [u8; 8] = [216, 74, 9, 0, 56, 140, 93, 75];
+pub const SC_STATUS: usize = 10;
+pub const SC_MINT: usize = 11;
+pub const SC_ADMIN: usize = 43;
+pub const SC_ADMIN_REVOKED: usize = 75;
+pub const SC_SHAREHOLDERS_LEN: usize = 76;
+pub const SC_SHAREHOLDERS: usize = 80;
+pub const SC_SHAREHOLDER_SIZE: usize = 34;
+pub const SC_MAX_SHAREHOLDERS: usize = 10;
+
+/// PumpSwap `sell_v2` (idl/pump_amm.json): 17 accounts, data = disc | base_amount_in u64 | min_quote_amount_out u64.
+pub const PS_SELL_V2_DISC: [u8; 8] = [93, 246, 130, 60, 231, 233, 64, 178];
+/// `init_user_volume_accumulator` (same IDL). Payer creates ["user_volume_accumulator", user].
+pub const PS_INIT_USER_VOLUME_DISC: [u8; 8] = [94, 6, 202, 115, 255, 96, 232, 183];
+/// Second seed of PumpSwap `sell_v2`'s `fee_config` PDA, under PUMP_FEES.
+pub const PS_FEE_CONFIG_SEED: [u8; 32] = [
+    12, 20, 222, 252, 130, 94, 198, 118, 148, 37, 8, 24, 187, 101, 64, 101, 244, 41, 141, 49, 86, 213, 113, 180, 212, 248, 9, 12, 24, 233, 168, 99,
+];
+
+/// `Launch.mode`: the Launch PDA is a 9_000 bps shareholder next to the lister's 1_000 bps, so boost burns
+/// 1/9 and sells 8/9 of what it holds (net 10 % lister / 10 % burn / 80 % vault).
+pub const LAUNCH_MODE_SHARED: u8 = 0;
+/// `Launch.mode`: the Launch PDA receives 100 %; boost pays the lister 10 %, burns 10 %, sells 80 %.
+pub const LAUNCH_MODE_FULL: u8 = 1;
+/// Lister's share of creator fees (bps) in either mode.
+pub const LAUNCH_LISTER_BPS: u16 = 1_000;
+/// boost is a no-op below this many MEME base units (griefing floor).
+pub const BOOST_DUST: u64 = 1_000;
+pub const LAUNCH_SEED: &[u8; 6] = b"launch";
+pub const LAUNCH_SOL_SEED: &[u8; 10] = b"launch-sol";
 // PumpSwap Pool: disc 8 | bump 1 | index u16 | creator 32 | base_mint | quote_mint | lp_mint | base_ata | quote_ata | ...
 pub const PS_CREATOR: usize = 11;
 pub const PS_BASE_MINT: usize = 43;
@@ -126,6 +183,8 @@ pub const TAG_SETTLE_END: u8 = 4;
 pub const TAG_CLAIM_FEES: u8 = 5;
 pub const TAG_INIT_BURN: u8 = 6;
 pub const TAG_BURN_MEME: u8 = 7;
+pub const TAG_REGISTER_LAUNCH: u8 = 8;
+pub const TAG_BOOST: u8 = 9;
 
 // Meteora DBC (v0.2.1)
 pub const DBC_SWAP2_HOOK_DISC: [u8; 8] = [183, 93, 153, 40, 24, 230, 194, 151];

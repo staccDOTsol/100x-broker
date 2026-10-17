@@ -6,9 +6,9 @@ export type MetaPick = {
   ticker: string;
   headline: string;
   thesis: string;
-  /** The one button: UP / DOWN preselects that side on the market page; VAULT sends to the delta-neutral vault. */
+  /** The one button: UP / DOWN preselects that side on the market page; VAULT preselects its Yield option (?side=yield). */
   side: "UP" | "DOWN" | "VAULT";
-  /** VAULT rows: the vault key for /yield/<vault>. Leave unset while it's being born: the row then points at the market's vault panel (#dn). */
+  /** VAULT rows: the vault's key, for reference only (the button goes to the market page, where Yield lives). */
   vault?: string;
   tag: string;
 };

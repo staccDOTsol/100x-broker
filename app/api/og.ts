@@ -4,6 +4,10 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { META } from "../src/meta.js";
 import { PublicKey } from "@solana/web3.js";
+import { warCard } from "./_lib/og.js";
+import { readView, FEATURED } from "./war.js";
+import { loadPlayer } from "../src/lib/war.js";
+import { serverConnection } from "../src/lib/upstream.js";
 import { marketCard, metaCard, portfolioCard, positionCard, readBalance, readMarketCard, readPortfolio, renderPng, seriesFromMarket, siteCard, solUsd, vaultCard } from "./_lib/og.js";
 import { conn as dnConn, decodeMarket, decodeVault, valuation } from "./_lib/dnplan.js";
 import { getAsset } from "./_lib/das.js";
@@ -25,7 +29,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const owner = key(req.query.owner);
     const side = req.query.side === "1" ? 1 : req.query.side === "0" ? 0 : null;
     let el;
-    if (m && side !== null && owner) {
+    if (req.query.war !== undefined) {
+      // a Stars War card: /api/og?war=<id>|featured&sc=live|lead|won|divs|open&by=<wallet>&v=<state tag>
+      const id = req.query.war === "featured" || req.query.war === "" ? FEATURED : Number(req.query.war);
+      const out = await readView(id);
+      if (!out) return res.status(404).json({ error: "no such game" });
+      const by = key(req.query.by)?.toBase58() ?? null;
+      let extra = {};
+      if (req.query.sc === "divs" && by) {
+        const p = await loadPlayer(serverConnection(), out.g, key(by)!);
+        const units = Number(p.owed) / 10 ** out.v.asset.decimals;
+        extra = { owed: units, owedUsd: out.v.asset.usd === null ? null : units * out.v.asset.usd };
+      }
+      const v = out.v;
+      el = warCard({ ...v, symbol: v.asset.symbol, image: v.asset.image }, String(req.query.sc ?? "live"), by, extra);
+      const png = await renderPng(el);
+      // the URL carries the state tag, so a given URL's picture never changes: cache it hard
+      return res.setHeader("content-type", "image/png").setHeader("cache-control", req.query.v ? "public, max-age=86400, s-maxage=86400, immutable" : CACHE).send(png);
+    } else if (m && side !== null && owner) {
       const card = await readMarketCard(m);
       const amount = await readBalance(owner, card.sides[side].mint);
       // the P&L the bag page shows for this row: cost basis from the owner's own buys / sells / cash-outs

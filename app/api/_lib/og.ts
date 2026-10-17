@@ -9,8 +9,10 @@ import sharp from "sharp";
 import { getAsset } from "./das.js";
 import { memo } from "./memo.js";
 import { MARKET_ORACLE_KIND, VENUE_LABEL, type Venue, pumpSwapPoolOf, slotMints, slotSpotTick, venueOfKind } from "../../src/lib/venues.js";
+import { classify } from "./category.js";
+import type { Category } from "../../src/lib/category.js";
 
-const PROGRAM_ID = new PublicKey(process.env.VITE_PROGRAM_ID ?? "T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb");
+const PROGRAM_ID = new PublicKey(process.env.VITE_PROGRAM_ID ?? "9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6");
 const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 const ATA_PROGRAM = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 const WSOL = "So11111111111111111111111111111111111111112";
@@ -22,7 +24,7 @@ const MARKET_LEN = 1008;
 const conn = () => {
   const u = process.env.HELIUS_RPC_URL;
   if (!u) throw new Error("HELIUS_RPC_URL not configured");
-  return new Connection(u, "confirmed");
+  return serverConnection();
 };
 
 // ---------- palette (dark theme tokens, hex for satori) ----------
@@ -146,6 +148,8 @@ export type MarketCard = {
   series: Pt[];
   quoteSymbol: string;
   venue: Venue;
+  /** meme | major | stonk | stable | other (src/lib/category.ts). */
+  category: Category;
 };
 
 export type Pt = { ts: number; price: number };
@@ -308,6 +312,7 @@ async function loadMarketCard(key: PublicKey, withImage: boolean): Promise<Marke
     live = { ts: nowTs, tick: slotSpotTick(venue, obs.data, opool.data, psPool?.data) };
   }
   const [sol, rate, asset] = await Promise.all([solUsd(), lstRate(c), getAsset(underlying.toBase58()).catch(() => null)]);
+  const category = await classify({ mint: underlying.toBase58(), symbol: asset?.symbol, name: asset?.name }).catch((): Category => "other");
   const quoteUsd = (raw: bigint) => (sol ? (Number(raw) / 1e9) * rate * sol : null);
   const tq = (venue === "clmm" ? twapQ32(obs.data, ckpts, windowSecs) : sampledTwapQ32(ckpts, windowSecs, nowTs, live!.tick)) ?? i64(d, 424);
   const tick = Number(tq) / 2 ** 32;
@@ -348,6 +353,7 @@ async function loadMarketCard(key: PublicKey, withImage: boolean): Promise<Marke
     series: seriesFromMarket(d, obs.data, opool.data, nowTs - 86400, kind, [d0, d1], live),
     quoteSymbol: quoteMint === WSOL ? "SOL" : STABLES.has(quoteMint) ? "USD" : "quote",
     venue,
+    category,
   };
 }
 
@@ -429,7 +435,7 @@ function tokenHead(m: MarketCard, size = 120) {
   return row(
     { alignItems: "center", gap: 20 },
     m.image ? h("img", { src: m.image, width: size, height: size, style: { borderRadius: size / 2 } }) : null,
-    col({}, display(`$${m.ticker}`, size * 1.1), meta(`±100× · ${VENUE_LABEL[m.venue]} TWAP · ${m.windowMin} min`)),
+    col({}, display(`$${m.ticker}`, size * 1.1), meta(`±100× · ${VENUE_LABEL[m.venue]} TWAP · ${m.windowMin} min${m.category === "other" || m.category === "stable" ? "" : ` · ${m.category}`}`)),
   );
 }
 
@@ -457,6 +463,7 @@ export function marketCard(m: MarketCard): El {
 }
 
 import { fmtAge, fmtPct, type Pnl } from "./pnl.js";
+import { serverConnection } from "../../src/lib/upstream.js";
 
 /** P&L strip for a position card: the return since entry, big, then the split. USD via the market's quote conversion. */
 function pnlRow(m: MarketCard, pnl: Pnl): El {
@@ -605,4 +612,87 @@ export function portfolioCard(owner: string, positions: Position[]): El {
 export async function renderPng(el: El): Promise<Buffer> {
   const svg = await satori(el as any, { width: 1200, height: 630, fonts: loadFonts() as any });
   return Buffer.from(new Resvg(svg, { fitTo: { mode: "width", value: 1200 } }).render().asPng());
+}
+
+// ---------- Stars War (lastbidwins.fun) ----------
+// One card per scenario; the share URL carries `v` (the game's state tag) so every new state is a new image to X's cache.
+import { creatureUri, TEAM_COLOR } from "./creatures.js";
+export type WarCardData = {
+  id: number; phase: string; symbol: string; image: string | null;
+  pot: { units: number; usd: number | null }; minNext: { units: number; usd: number | null }; lastBid: { units: number; usd: number | null };
+  winnerTakes: { units: number; usd: number | null };
+  payoff?: { win: { units: number; usd: number | null }; multiple: number };
+  secondsLeft: number | null; roundSecs: number; bids: number; keys: number; leader: string | null; lastTeam: string | null;
+  teams: { Bull: number; Snek: number; Bear: number }; pct: { winner: number; referrer: number };
+};
+const shortKey = (k: string | null) => (k ? `${k.slice(0, 4)}…${k.slice(-4)}` : "nobody");
+const compactN = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(n >= 1e5 ? 0 : 1)}K` : n >= 1 ? n.toFixed(2) : n.toPrecision(3));
+const usdTxt = (u: number | null) => (u === null ? "" : u >= 1 ? `$${u.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `$${u.toPrecision(2)}`);
+const clock = (s: number) => `${Math.floor(s / 3600) ? `${Math.floor(s / 3600)}:` : ""}${String(Math.floor((s % 3600) / 60)).padStart(Math.floor(s / 3600) ? 2 : 1, "0")}:${String(s % 60).padStart(2, "0")}`;
+const TEAM_IX: Record<string, number> = { Bull: 0, Snek: 1, Bear: 2 };
+
+function warFrame(...kids: unknown[]) {
+  return col(
+    { width: 1200, height: 630, background: C.paper, color: C.ink, padding: "44px 56px", fontFamily: "Sans", justifyContent: "space-between" },
+    ...kids,
+    row(
+      { justifyContent: "space-between", alignItems: "flex-end", borderTop: `3px solid ${C.ink2}`, paddingTop: 16 },
+      row({ alignItems: "baseline", gap: 6 }, display("lastbidwins", 38), txt(".fun", { fontFamily: "Display", fontSize: 26, color: C.ink3 })),
+      meta("last bid wins the pot · keys earn off every bid", C.ink3),
+    ),
+  );
+}
+
+export function warCard(d: WarCardData, scenario: string, by: string | null, extra: { owed?: number; owedUsd?: number | null } = {}): El {
+  const sym = `$${d.symbol}`;
+  const team = d.lastTeam ? TEAM_IX[d.lastTeam] ?? 1 : 1;
+  const status =
+    d.phase === "open" ? "OPEN · CLOCK STARTS ON THE NEXT BID"
+    : d.phase === "live" ? `LIVE · ${clock(d.secondsLeft ?? 0)} LEFT`
+    : d.phase === "ending" ? `ENDING · ${clock(d.secondsLeft ?? 0)} LEFT`
+    : d.phase === "expired" ? "CLOCK'S DEAD · SETTLE IT" : "OVER";
+  const statusColor = d.phase === "ending" ? C.down : d.phase === "live" ? C.up : d.phase === "open" ? C.signal : C.ink3;
+  const amount = (a: { units: number; usd: number | null }) => `${compactN(a.units)} ${sym}`;
+  let head: unknown, sub: string;
+  if (scenario === "lead" && by) {
+    head = col({ gap: 6 }, display(`${shortKey(by)} took the lead`, 74, C.ink), display(usdTxt(d.lastBid.usd) || amount(d.lastBid), 92, C.signal));
+    sub = `bid ${amount(d.lastBid)} · pot ${usdTxt(d.pot.usd)} ${amount(d.pot)} · snipe them: next bid ≥ ${amount(d.minNext)}`;
+  } else if ((scenario === "won" || d.phase === "expired" || d.phase === "settled") && d.leader) {
+    head = col({ gap: 6 }, display(`${shortKey(d.leader)} won`, 84, C.ink), display(usdTxt(d.winnerTakes.usd) || amount(d.winnerTakes), 104, C.signal));
+    sub = `last bid when the clock died. ${amount(d.winnerTakes)} of a ${amount(d.pot)} pot. next war starts on the next bid.`;
+  } else if (scenario === "divs" && by && extra.owed !== undefined) {
+    head = col({ gap: 6 }, display(`${shortKey(by)}'s keys earned`, 74, C.ink), display(usdTxt(extra.owedUsd ?? null) || `${compactN(extra.owed)} ${sym}`, 104, C.up));
+    sub = `every bid mints a key. every later bid pays the keys before it. ${d.keys} keys in war #${d.id}.`;
+  } else if (d.phase === "open") {
+    head = col({ gap: 6 }, display("Waiting for a challenger", 74, C.ink), display(`pot ${usdTxt(d.pot.usd) || amount(d.pot)}`, 104, C.signal));
+    sub = `${shortKey(d.leader)} opened with ${amount(d.lastBid)}. beat it to start the ${Math.round(d.roundSecs / 60)}-minute clock.`;
+  } else {
+    head = col({ gap: 6 }, display("Pot", 60, C.ink3), display(usdTxt(d.pot.usd) || amount(d.pot), 132, C.signal));
+    sub = `${amount(d.pot)} · last bid when it dies takes ${d.pct.winner / 100}%`;
+  }
+  const teamBar = row(
+    { gap: 14 },
+    ...(["Bull", "Snek", "Bear"] as const).map((t, i) =>
+      row({ gap: 8, alignItems: "center", padding: "8px 14px", border: `2px solid ${i === team ? TEAM_COLOR[i] : C.rule}`, borderRadius: 8 },
+        h("img", { src: creatureUri(i, false, 64), width: 40, height: 40 }), mono(`${t} ${d.teams[t]}`, 24, TEAM_COLOR[i])),
+    ),
+  );
+  return warFrame(
+    row(
+      { justifyContent: "space-between", alignItems: "center" },
+      meta(`war #${d.id} · ${sym}`, C.ink2),
+      meta(status, statusColor),
+    ),
+    row(
+      { justifyContent: "space-between", alignItems: "center" },
+      col({ gap: 14, width: 800 }, head, txt(sub, { fontFamily: "Sans", fontSize: 24, color: C.ink2, lineHeight: 1.3 })),
+      col({ alignItems: "center", gap: 4 }, h("img", { src: creatureUri(team, true, 220), width: 210, height: 210 }), meta(d.leader ? `leader ${shortKey(d.leader)}` : "no leader", C.ink3)),
+    ),
+    row({ justifyContent: "space-between", alignItems: "center" }, teamBar,
+      d.payoff && d.phase !== "expired" && d.phase !== "settled"
+        ? col({ alignItems: "flex-end", gap: 4 },
+            mono(`${usdTxt(d.minNext.usd) || amount(d.minNext)} to win ${usdTxt(d.payoff.win.usd) || amount(d.payoff.win)}`, 26, C.ink),
+            mono(`${d.payoff.multiple.toFixed(1)}× if nobody tops it`, 22, C.signal))
+        : mono(`next bid ≥ ${amount(d.minNext)}${d.minNext.usd === null ? "" : ` · ${usdTxt(d.minNext.usd)}`}`, 24, C.ink)),
+  );
 }
