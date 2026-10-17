@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="An on-chain investigation into the PUMP testing wallet that launched titty / TEST through LetsBonk at the peak of the Solana launchpad war." />
+  <meta property="og:title" content="Titties Won the Launchpad War" />
+  <meta property="og:description" content="The competitor probe is on-chain. What happened next is not." />
+  <meta property="og:type" content="article" />
+  <meta property="og:url" content="https://testtitties.fun/" />
+  <link rel="canonical" href="https://testtitties.fun/" />
+  <title>TEST TITTIES — The Full On-Chain Trail</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --paper: oklch(18% 0.018 77);
+      --paper-2: oklch(22% 0.022 77);
+      --ink: oklch(91% 0.018 78);
+      --muted: oklch(69% 0.022 78);
+      --faint: oklch(52% 0.02 78);
+      --line: oklch(32% 0.025 78);
+      --signal: oklch(78% 0.13 72);
+      --signal-soft: oklch(27% 0.045 72);
+      --proof: oklch(75% 0.10 153);
+      --caveat: oklch(78% 0.12 72);
+      --measure: 70ch;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+      font-size: 18px;
+      line-height: 1.66;
+      text-rendering: optimizeLegibility;
+    }
+    a {
+      color: var(--signal);
+      text-decoration-color: color-mix(in oklch, var(--signal), transparent 55%);
+      text-underline-offset: 0.2em;
+    }
+    a:hover { text-decoration-color: var(--signal); }
+    a:focus-visible {
+      outline: 2px solid var(--signal);
+      outline-offset: 4px;
+      border-radius: 2px;
+    }
+    code {
+      font-family: "SFMono-Regular", Consolas, monospace;
+      font-size: 0.78em;
+      overflow-wrap: anywhere;
+      color: color-mix(in oklch, var(--ink), var(--signal) 24%);
+    }
+
+    .masthead {
+      border-bottom: 1px solid var(--line);
+      padding: 18px 24px;
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .masthead-inner {
+      max-width: 1120px;
+      margin: 0 auto;
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      color: var(--muted);
+    }
+    .masthead strong { color: var(--ink); font-weight: 600; }
+
+    main { max-width: 1120px; margin: 0 auto; padding: 76px 24px 96px; }
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.55fr) minmax(220px, 0.45fr);
+      gap: 64px;
+      align-items: end;
+      padding-bottom: 72px;
+    }
+    .kicker {
+      margin: 0 0 20px;
+      color: var(--signal);
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    h1, h2, h3 { text-wrap: balance; }
+    h1 {
+      margin: 0;
+      max-width: 12ch;
+      font-size: clamp(3.4rem, 9vw, 7.4rem);
+      line-height: 0.88;
+      font-weight: 500;
+      letter-spacing: -0.065em;
+    }
+    .deck {
+      margin: 28px 0 0;
+      max-width: 58ch;
+      color: var(--muted);
+      font-size: clamp(1.12rem, 2vw, 1.4rem);
+      line-height: 1.5;
+    }
+    .token-card {
+      aspect-ratio: 1;
+      background: oklch(22% 0.045 77);
+      border: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      padding: 18px;
+      color: var(--muted);
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      line-height: 1.45;
+    }
+    .token-card b {
+      display: block;
+      color: var(--ink);
+      font-family: "Iowan Old Style", Georgia, serif;
+      font-size: 30px;
+      font-weight: 500;
+      letter-spacing: -0.03em;
+    }
+
+    .thesis {
+      max-width: 900px;
+      margin: 0 0 88px;
+      padding: 26px 28px 28px;
+      background: var(--signal-soft);
+      border-top: 2px solid var(--signal);
+    }
+    .thesis p { margin: 0; font-size: 1.1rem; }
+    .eyebrow {
+      display: block;
+      margin-bottom: 9px;
+      color: var(--signal);
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    section { margin-top: 92px; }
+    section > h2 {
+      margin: 0 0 34px;
+      font-size: clamp(2rem, 4vw, 3.2rem);
+      line-height: 1;
+      font-weight: 500;
+      letter-spacing: -0.04em;
+    }
+    .measure { max-width: var(--measure); }
+    .measure p { margin: 0 0 1.35em; }
+
+    .timeline { max-width: 900px; }
+    .event {
+      display: grid;
+      grid-template-columns: 150px 18px minmax(0, 1fr);
+      gap: 18px;
+      min-height: 128px;
+    }
+    .event time {
+      padding-top: 1px;
+      color: var(--muted);
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .rail { position: relative; display: flex; justify-content: center; }
+    .rail::before {
+      content: "";
+      position: absolute;
+      top: 10px;
+      bottom: -10px;
+      width: 1px;
+      background: var(--line);
+    }
+    .event:last-child .rail::before { display: none; }
+    .dot {
+      position: relative;
+      width: 9px;
+      height: 9px;
+      margin-top: 5px;
+      border-radius: 50%;
+      background: var(--faint);
+      border: 1px solid var(--paper);
+    }
+    .event.pivot .dot { background: var(--signal); }
+    .event h3 {
+      margin: -4px 0 7px;
+      font-size: 1.3rem;
+      line-height: 1.25;
+      font-weight: 600;
+    }
+    .event p { margin: 0 0 7px; color: var(--muted); }
+    .source {
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    .evidence {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .evidence th, .evidence td {
+      padding: 16px 14px;
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid var(--line);
+    }
+    .evidence th {
+      color: var(--faint);
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 10px;
+      font-weight: 500;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .evidence td:first-child { width: 28%; font-weight: 600; }
+    .evidence td:last-child { width: 18%; }
+    .status {
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .status.proven { color: var(--proof); }
+    .status.strong { color: var(--signal); }
+    .status.unknown { color: var(--caveat); }
+
+    .split {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 64px;
+    }
+    .split h3 {
+      margin: 0 0 14px;
+      font-size: 1.55rem;
+      font-weight: 500;
+      letter-spacing: -0.025em;
+    }
+    .split p { color: var(--muted); margin: 0 0 1.2em; }
+
+    .ledger {
+      display: grid;
+      grid-template-columns: 190px minmax(0, 1fr);
+      gap: 12px 24px;
+      max-width: 900px;
+      margin: 0;
+    }
+    .ledger dt {
+      color: var(--faint);
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 11px;
+      line-height: 1.6;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .ledger dd { margin: 0; line-height: 1.3; }
+
+    .verdict {
+      max-width: 900px;
+      margin-top: 100px;
+      padding-top: 34px;
+      border-top: 1px solid var(--line);
+    }
+    .verdict p {
+      margin: 0;
+      font-size: clamp(1.45rem, 3vw, 2.25rem);
+      line-height: 1.35;
+      letter-spacing: -0.025em;
+    }
+    footer {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 0 24px 38px;
+      color: var(--faint);
+      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      font-size: 10px;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 760px) {
+      body { font-size: 16px; }
+      main { padding-top: 48px; }
+      .hero { grid-template-columns: 1fr; gap: 36px; padding-bottom: 52px; }
+      .token-card { width: min(68vw, 260px); }
+      .event { grid-template-columns: 100px 14px minmax(0, 1fr); gap: 10px; }
+      .split { grid-template-columns: 1fr; gap: 34px; }
+      .ledger { grid-template-columns: 1fr; gap: 4px; }
+      .ledger dd { margin-bottom: 14px; }
+      .table-wrap { overflow-x: auto; }
+      .evidence { min-width: 720px; }
+      section { margin-top: 68px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header class="masthead">
+    <div class="masthead-inner">
+      <strong>testtitties.fun</strong>
+      <span>Stacc → Dylan → PUMP → LetsBonk</span>
+    </div>
+  </header>
+
+  <main>
+    <article>
+      <header class="hero">
+        <div>
+          <p class="kicker">The competitor probe is on-chain</p>
+          <h1>Titties won the launchpad war.</h1>
+          <p class="deck">
+            The trail starts with Stacc’s devnet pump-v2-amm, passes through Dylan’s
+            devnet tester, PUMP’s mainnet Token-2022 experiments, a one-person Squads
+            treasury and a provisioned burner—then ends with <em>titty</em> / TEST on
+            LetsBonk at the apex of LetsBonk’s lead.
+          </p>
+        </div>
+        <div class="token-card" aria-label="The token's blank brown artwork">
+          <span>THE ORIGINAL ARTWORK</span>
+          <b>titty</b>
+          <span>ticker: test<br />description: titties</span>
+        </div>
+      </header>
+
+      <aside class="thesis">
+        <span class="eyebrow">Read this first</span>
+        <p>
+          “Titties won the launchpad war” is the thesis, not a causal fact.
+          The defensible finding is a continuous operational trail:
+          <strong>Stacc’s AMM → Dylan’s test wallet → PUMP’s hooked mainnet test
+          supply → Squads → the LetsBonk burner.</strong> The chain cannot show what
+          was learned or changed internally.
+        </p>
+      </aside>
+
+      <section>
+        <h2>The sequence</h2>
+        <div class="timeline">
+          <div class="event">
+            <time datetime="2024-05-13">13 May 2024</time><div class="rail"><i class="dot"></i></div>
+            <div><h3>Stacc deploys pump-v2-amm on devnet</h3><p><code>7ihN</code> signs the deployment of <code>GuA9</code>. The executable binary identifies itself as <code>programs/pump-v2-amm</code>; <code>7ihN</code> remains its upgrade authority.</p><a class="source" href="https://explorer.solana.com/tx/4gqWzFDxDrisbbANz5qfMVCrrJDAahyJHpDAAbJFT1zKDC151pqqQD3FLDLJ2Zqj3yRZ3m3QCaALuzQh8teu32ui?cluster=devnet">Deployment transaction</a></div>
+          </div>
+          <div class="event">
+            <time datetime="2024-05-14">14–15 May 2024</time><div class="rail"><i class="dot"></i></div>
+            <div><h3>Dylan’s 745x wallet tests Stacc’s AMM</h3><p><code>745x</code> and <code>GuA9</code> share 15 transactions. One succeeds: <code>745x</code> signs <code>GuA9</code>’s Create instruction on May 14. The surrounding failures show active integration debugging.</p><a class="source" href="https://explorer.solana.com/tx/5wVumjnDW69hiCpT5KAz8TZR98B1XUQLLpccDogXR6cnRjJ536Np45rKyLuL3R1vtpmbU6VA5t2Kgv6y8G2jyXjH?cluster=devnet">Successful Create</a></div>
+          </div>
+          <div class="event">
+            <time datetime="2025-04-25">25 Apr 2025</time><div class="rail"><i class="dot"></i></div>
+            <div><h3>LetsBonk launches</h3><p>BONK and Raydium open a direct Pump.fun competitor on LaunchLab.</p><a class="source" href="https://www.coindesk.com/markets/2025/04/29/bonk-bets-gain-favor-as-new-token-issuance-platform-nets-800k-in-3-days">Contemporaneous report</a></div>
+          </div>
+          <div class="event">
+            <time datetime="2025-06-19T15:36:28Z">19 Jun 2025<br />15:36 UTC</time><div class="rail"><i class="dot"></i></div>
+            <div><h3>neveruseme mints the hooked PUMP test supply</h3><p><code>5ph</code> / neveruseme signs the mint of one trillion Eymp PUMP tokens, then signs their transfer into the <code>bravo-whisky</code> Squads vault. The same day, <code>745x</code> is referenced as owner of a zero-balance Eymp Token-2022 account.</p><a class="source" href="https://solscan.io/tx/5HcP67wh2sj6vNyaiwhbCb8EkGzQ5uE7RudFT6qNW3D2UsEdkJgtjr8oucGGnCkeBioPnLNMDfsCuHJcNYswG6YW">Mint transaction</a></div>
+          </div>
+          <div class="event">
+            <time datetime="2025-06-19T19:23:48Z">19 Jun 2025<br />later</time><div class="rail"><i class="dot"></i></div>
+            <div><h3>Squads provisions the future LetsBonk burner</h3><p><code>8xwk</code> signs a 1-of-1 Squads execution transferring 37,723,337,250 Eymp tokens from <code>3Gkz</code> to an ATA owned by <code>8oqr</code>. Transfer hook <code>9Ypq</code> executes.</p><a class="source" href="https://solscan.io/tx/4NLZi8G5wCmHGueoLL84r5XYAviSs6Lr3cSvnfBuc7PUCWE9AEb6VaUocFUPiDZ4y7aF2bNY2qs5n7sgtBdSEY83">Allocation transaction</a></div>
+          </div>
+          <div class="event">
+            <time datetime="2025-07-06">06 Jul 2025</time><div class="rail"><i class="dot"></i></div>
+            <div><h3>LetsBonk first flips Pump</h3><p>LetsBonk leads daily launches, graduations and volume for the first time.</p><a class="source" href="https://www.theblock.co/news/ecosystems/2025-07-06-letsbonk-dethrones-pump-fun-with-higher-daily-memecoin-volume-token-launches-361189">Market report</a></div>
+          </div>
+          <div class="event">
+            <time datetime="2025-07-29">29 Jul 2025</time><div class="rail"><i class="dot"></i></div>
+            <div><h3>The displacement peaks</h3><p>Reported 24-hour launchpad share: LetsBonk 83.5%, Pump.fun 7.94%.</p><a class="source" href="https://www.lookonchain.com/feeds/22251">Reported snapshot</a></div>
+          </div>
+          <div class="event pivot">
+            <time datetime="2025-08-05T01:15:17Z">05 Aug 2025<br />01:15 UTC</time><div class="rail"><i class="dot"></i></div>
+            <div><h3>“titty” / TEST launches through LetsBonk</h3><p>The same <code>8oqr</code> wallet signs a LaunchLab initialization for a one-billion-supply token: name “titty,” ticker “test,” description “titties.”</p><a class="source" href="https://solscan.io/tx/58xXCUKphu6iEAKnBJ6zzqBes4RsGXyNmizd4t42xtrbmUuWSL8RGnADPzNRm6DrQbCodTwqKo1XcBYGATnpZiAc">Inspect launch</a></div>
+          </div>
+          <div class="event pivot">
+            <time datetime="2025-08-06">06 Aug 2025</time><div class="rail"><i class="dot"></i></div>
+            <div><h3>Pump retakes the daily launch count</h3><p>Pump records 13,690 launches against LetsBonk’s 13,392. LetsBonk still leads daily trading volume.</p><a class="source" href="https://www.theblock.co/news/ecosystems/2025-08-06-pump-fun-reclaims-letsbonk-365737">Market report</a></div>
+          </div>
+          <div class="event">
+            <time datetime="2025-08-18">18 Aug 2025</time><div class="rail"><i class="dot"></i></div>
+            <div><h3>The reversal becomes a rout</h3><p>Pump reaches roughly 90% of graduated-token share while LetsBonk falls near 3%. Reporting points to bot deployers switching back and aggressive PUMP buybacks.</p><a class="source" href="https://www.theblock.co/news/business/2025-08-18-solana-memecoin-launchpad-war-flips-again-as-pump-takes-top-spot-amid-letsbonk-collapse-367266">Retrospective</a></div>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>The evidentiary ladder</h2>
+        <div class="table-wrap">
+          <table class="evidence">
+            <thead><tr><th>Claim</th><th>Evidence</th><th>Assessment</th></tr></thead>
+            <tbody>
+              <tr><td>Stacc deployed the AMM</td><td>May 13, 2024: <code>7ihN</code> signs deployment of <code>GuA9</code>; its binary embeds <code>programs/pump-v2-amm</code>, and <code>7ihN</code> is upgrade authority.</td><td><span class="status proven">Proven</span></td></tr>
+              <tr><td>Dylan’s devnet identity used it</td><td>May 14–15: <code>745x</code> and <code>GuA9</code> overlap in 15 transactions; <code>745x</code> signs a successful <code>Create</code>.</td><td><span class="status strong">On-chain use; identity supplied by source</span></td></tr>
+              <tr><td><code>745x</code> bridges into mainnet testing</td><td>June 19, 2025: <code>745x</code> is the owner field for an Eymp Token-2022 ATA initialized in the hook experiment. It is readonly and does not sign that transaction.</td><td><span class="status strong">Cluster link, not same-key proof</span></td></tr>
+              <tr><td>neveruseme creates the Eymp supply</td><td><code>5ph</code> signs the one-trillion-token Eymp mint and signs the entire transfer into <code>3Gkz</code>. Pump’s profile API names <code>5ph</code> “neveruseme.”</td><td><span class="status strong">On-chain acts; identity supplied by source</span></td></tr>
+              <tr><td>The PUMP cluster selected <code>8oqr</code></td><td>On June 19, <code>8xwk</code> signed a 1-of-1 Squads execution sending 37.723B Eymp tokens to <code>8oqr</code>; the custom PUMP transfer hook executed.</td><td><span class="status proven">Proven</span></td></tr>
+              <tr><td><code>8oqr</code> launched the competitor test</td><td>On August 5, <code>8oqr</code> signed LaunchLab initialization for mint <code>3icj…bonk</code> with titty / test / titties metadata.</td><td><span class="status proven">Proven</span></td></tr>
+              <tr><td>It was an active burner, not passive dust</td><td>The wallet has 28 mainnet and 34 devnet transactions. It was initially funded with 8 SOL by <code>GqB1…3Pad</code>.</td><td><span class="status proven">Proven</span></td></tr>
+              <tr><td>The operation is Dylan-linked</td><td>The wallet was deliberately provisioned by the PUMP experimental treasury during the period identified by the source as a two-developer operation.</td><td><span class="status strong">Strong, not key-level proof</span></td></tr>
+              <tr><td>The probe caused Pump’s comeback</td><td>Temporal adjacency: TEST on August 5; daily launch-count flip on August 6.</td><td><span class="status unknown">Unproven</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="split">
+        <div>
+          <h3>What the chain says</h3>
+          <p>This was not a random retail launch found through a dust-holder list. Stacc’s <code>7ihN</code> deployed the devnet AMM; Dylan’s <code>745x</code> signed its Create path the following day.</p>
+          <p>A year later, <code>745x</code> reappeared as a user identity in the same Eymp experiment that <code>5ph</code> / neveruseme minted and moved into Squads. Squads then deliberately allocated 37.723 billion Eymp tokens to <code>8oqr</code>. Six weeks later, <code>8oqr</code> used LetsBonk’s production launch path.</p>
+        </div>
+        <div>
+          <h3>What the chain cannot say</h3>
+          <p>It cannot show who physically held the key, what they observed, whether findings were communicated to Pump, or which product, incentive, liquidity or routing decision followed.</p>
+          <p>It also cannot prove Dylan controlled <code>8xwk</code> or <code>8oqr</code>. The report distinguishes user-supplied identity claims for <code>745x</code> and <code>5ph</code> from the on-chain acts those addresses performed.</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Reproducibility ledger</h2>
+        <dl class="ledger">
+          <dt>Stacc deployer</dt><dd><code>7ihN8QaTfNoDTRTQGULCzbUT3PHwPDTu5Brcu4iT2paP</code></dd>
+          <dt>Stacc pump-v2-amm</dt><dd><a href="https://explorer.solana.com/address/GuA9pdtCqntcxCCWr2W8WbD7YdN7RDCni1JrFbzibENg?cluster=devnet"><code>GuA9pdtCqntcxCCWr2W8WbD7YdN7RDCni1JrFbzibENg</code></a></dd>
+          <dt>Dylan devnet tester</dt><dd><code>745xaCXLN2C4Xd7iD4BzPFmo8gypECV2A9ihxDGHAsgj</code></dd>
+          <dt>neveruseme wallet</dt><dd><code>5phHASve5KWtBayLmTMubvzin58WAUpUZLmk8UEUcW6Z</code></dd>
+          <dt>Squads config</dt><dd><code>A16s3wi1jP5Xgee3PnCyoQCh2zAwT9pFYNTTP4okeJSz</code></dd>
+          <dt>Sole member / signer</dt><dd><code>8xwk4kFKkisnQ1CJAufgryezQ2D8wNhXKZT3mQ44vm1g</code></dd>
+          <dt>Vault 0</dt><dd><a href="https://solscan.io/account/3Gkz7CZj5ugSEkXADh9FkTKGXxcyriB5zsJUkEHfRQVF"><code>3Gkz7CZj5ugSEkXADh9FkTKGXxcyriB5zsJUkEHfRQVF</code></a></dd>
+          <dt>Recipient / creator</dt><dd><a href="https://solscan.io/account/8oqrT3xuiBnGdgvza3rg7zD727DTtmubRknSQwYyyMdX"><code>8oqrT3xuiBnGdgvza3rg7zD727DTtmubRknSQwYyyMdX</code></a></dd>
+          <dt>PUMP test mint</dt><dd><code>EympvR3t6teXddQRi1BEd2eXz39q93LoEDbXNE6BAX12</code></dd>
+          <dt>Transfer hook</dt><dd><code>9YpqWRUVcFpH9jsJ8Ev67a91M92VzrXiZiBC29u8YKcm</code></dd>
+          <dt>titty / TEST mint</dt><dd><a href="https://solscan.io/token/3icjCdv74RTXnvwpdGg8YaLdQeXBkSXoXfCwjan5bonk"><code>3icjCdv74RTXnvwpdGg8YaLdQeXBkSXoXfCwjan5bonk</code></a></dd>
+        </dl>
+      </section>
+
+      <div class="verdict">
+        <span class="eyebrow">Bottom line</span>
+        <p>
+          The record starts with Stacc’s devnet AMM, follows Dylan’s tester into the
+          mainnet PUMP hook experiments, crosses a one-person Squads treasury into a
+          purposefully provisioned burner, and ends inside LetsBonk with “titty” / TEST.
+          Pump retook the daily launch count roughly one day later. The full operational
+          trail is documented; the playbook between probe and reversal remains missing.
+        </p>
+      </div>
+    </article>
+  </main>
+
+  <footer>
+    Sources: Solana mainnet/devnet RPC records, Solscan transaction views, Birdeye token
+    metadata, Squads v4 account data and contemporaneous reporting. Market-share figures
+    differ by metric; the text distinguishes launches, graduations and volume.
+  </footer>
+</body>
+</html>

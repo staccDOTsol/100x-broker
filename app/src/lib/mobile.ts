@@ -14,5 +14,7 @@ export function walletBrowserLinks(): { name: string; href: string }[] {
   return [
     { name: "Phantom", href: `https://phantom.app/ul/browse/${here}?ref=${ref}` },
     { name: "Solflare", href: `https://solflare.com/ul/v1/browse/${here}?ref=${ref}` },
+    // Trust's documented open_url link; coin_id is the SLIP-44 coin type, 501 for Solana
+    { name: "Trust", href: `https://link.trustwallet.com/open_url?coin_id=501&url=${here}` },
   ];
 }

@@ -15,3 +15,10 @@ node_modules/
 app/dist/
 app/.vercel/
 .DS_Store
+# agent notes and local scratch
+.claude/
+.tmp-*
+.smoke-*
+.devnet-*
+.wallet-index*
+/.*.so

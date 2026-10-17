@@ -2832,3 +2832,13 @@ a.mbar-cell:hover b {
   text-transform: none;
   letter-spacing: 0;
 }
+
+/* the house coin's market, pinned above every sort */
+.house-chip {
+  padding: 1px 7px;
+  font-size: 0.66rem;
+  border-radius: 999px;
+  color: oklch(0.2 0.03 70);
+  background: var(--signal);
+  border-color: var(--signal);
+}

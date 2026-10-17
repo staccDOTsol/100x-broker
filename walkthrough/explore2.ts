@@ -1,0 +1,25 @@
+// Full-page screenshot + controls of a route with a funded burner already connected: bun explore2.ts <path> <name>
+import { chromium } from "playwright-core";
+import { Keypair } from "@solana/web3.js";
+import bs58 from "bs58";
+const kp = Keypair.generate();
+await fetch("http://127.0.0.1:8899", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "surfnet_setAccount", params: [kp.publicKey.toBase58(), { lamports: 5e9 }] }) });
+const b = await chromium.launch({ executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless: true });
+const ctx = await b.newContext({ viewport: { width: 1280, height: 800 }, colorScheme: "dark" });
+await ctx.route("**/api/vanity**", (r) => r.abort());
+await ctx.addInitScript((s) => { localStorage.setItem("burner:v1", s); }, bs58.encode(kp.secretKey));
+const page = await ctx.newPage();
+await page.goto(`http://localhost:5180${process.argv[2]}`, { waitUntil: "domcontentloaded" });
+await page.waitForTimeout(2500);
+await page.locator("button", { hasText: "A throwaway wallet" }).first().click({ timeout: 4000 }).catch(() => {});
+await page.waitForTimeout(1500);
+await page.locator("button", { hasText: /start aping/i }).first().click({ timeout: 3000 }).catch(() => {});
+await page.locator("button", { hasText: /^try with a burner$/i }).first().click({ timeout: 2000 }).catch(() => {});
+await page.waitForTimeout(1500);
+await page.locator("button", { hasText: /start aping/i }).first().click({ timeout: 2000 }).catch(() => {});
+await page.keyboard.press("Escape");
+await page.waitForTimeout(6000);
+await page.screenshot({ path: `shots/${process.argv[3]}.png`, fullPage: true });
+const ctl = await page.locator("main button, main a.btn, main input, main [role=tab]").evaluateAll((els) => els.map((e) => `${e.tagName.toLowerCase()}${e.className ? "." + String(e.className).split(" ").join(".") : ""}${(e as HTMLInputElement).placeholder ? `[${(e as HTMLInputElement).placeholder}]` : ""} ${(e.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40)}`));
+console.log([...new Set(ctl)].join("\n"));
+await b.close();

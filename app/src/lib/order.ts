@@ -5,6 +5,7 @@ import type { MarketView } from "./chain";
 import type { MarketStat } from "./feed";
 import { VENUE_LABEL } from "./venues";
 import { useQuery } from "./url";
+import { MEME_MINT } from "../config";
 
 export type Sort = "volume" | "oldest" | "newest" | "disparity";
 export const SORTS: { id: Sort; label: string; hint: string }[] = [
@@ -22,6 +23,10 @@ export function useSort(): [Sort, (s: Sort) => void] {
 }
 
 const pots = (v: MarketView) => v.side[0].vault + v.side[1].vault;
+/** A market on the house coin ($100XBRO, the one 30% of every fee burns): pinned above every sort, for everyone. */
+export const isHouse = (v: MarketView) => v.underlyingMint === MEME_MINT.toBase58();
+/** House markets first, everything else in the order given (stable). */
+const houseFirst = (rows: MarketView[]) => [...rows.filter(isHouse), ...rows.filter((v) => !isHouse(v))];
 const byPots = (a: MarketView, b: MarketView) => (pots(b) > pots(a) ? 1 : pots(b) < pots(a) ? -1 : 0);
 
 /** Thick pot ÷ thin pot (≥ 1). Infinity when one side is empty and the other is not; 0 when both pots are empty. */
@@ -60,16 +65,16 @@ export function sortMarkets(views: MarketView[], stats: Map<string, MarketStat> 
       const x = disparity(a), y = disparity(b);
       return x === y ? byPots(a, b) : y > x ? 1 : -1;
     });
-    return { rows, ok: true };
+    return { rows: houseFirst(rows), ok: true };
   }
-  if (!stats) return { rows: rows.sort(byPots), ok: false };
+  if (!stats) return { rows: houseFirst(rows.sort(byPots)), ok: false };
   if (sort === "volume") rows.sort((a, b) => (vol(st(b)) > vol(st(a)) ? 1 : vol(st(b)) < vol(st(a)) ? -1 : byPots(a, b)));
   else {
     // a null birth means "older than the server scans": the oldest of all
     const born = (v: MarketView) => st(v)?.born ?? 0;
     rows.sort((a, b) => (sort === "oldest" ? born(a) - born(b) : born(b) - born(a)) || byPots(a, b));
   }
-  return { rows, ok: true };
+  return { rows: houseFirst(rows), ok: true };
 }
 
 export type Group = { lead: MarketView; siblings: MarketView[] };

@@ -17,12 +17,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   let image = `${origin}/api/og`;
   // canonical URL: the public path without the rewrite's own params (key/owner/wallet)
   const u = new URL(req.url ?? "/", origin);
-  for (const k of ["key", "owner", "wallet", "vault", "meta", "war", "id"]) u.searchParams.delete(k); // keep ref + s: X keys its cache on this URL
+  for (const k of ["key", "owner", "wallet", "vault", "meta", "war", "id", "ngu"]) u.searchParams.delete(k); // keep ref + s: X keys its cache on this URL
   const url = u.toString();
   const ref = typeof req.query.ref === "string" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(req.query.ref) ? req.query.ref : null;
   const via = ref ? ` Shared by ${ref.slice(0, 4)}…${ref.slice(-4)}.` : "";
   try {
-    if (req.query.war !== undefined) {
+    if (req.query.ngu) {
+      // /ngu — the stacSOL successor; static card
+      title = "NGU — Number Go Up: staked SOL whose SOL rate only goes up";
+      desc = `Every transfer pays a tax. A permissionless crank burns half, buys Fr28 with a sixth and adds the rest to liquidity the program owns forever. Volume is the yield.${via}`;
+      image = `${origin}/ngu/og.png`;
+    } else if (req.query.war !== undefined) {
       // /w/:id (and the bare lastbidwins.fun) — a Stars War game; the image URL carries scenario + state so X re-fetches it
       // /a?op=bid&g=<id>… (an action link) unfurls as its game's card too
       const isNew = req.query.war === "new" || req.query.war === "action" && req.query.op === "start";

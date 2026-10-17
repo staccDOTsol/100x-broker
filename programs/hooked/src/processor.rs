@@ -233,9 +233,10 @@ fn rebalance(
         let read = if m.oracle_kind == KIND_RAYDIUM_CLMM {
             require(obs.owner() == &RAYDIUM_CLMM, HookedError::InvalidOracle)?;
             let od = obs.try_borrow()?;
-            // a dead ring + the pool account => sample the pool's tick ourselves
+            // a dead ring + the pool account => sample the pool's tick ourselves, on long windows only:
+            // a 2-obs market keeps reading the ring, so a stale ring is no move until it writes again
             match pool {
-                Some(p) if oracle::ring_is_stale(&od, now) => {
+                Some(p) if oracle::samples(&od, m, now) => {
                     require(p.address() == &m.oracle_pool && p.owner() == &RAYDIUM_CLMM, HookedError::InvalidOracle)?;
                     let tick = {
                         let pd = p.try_borrow()?;
@@ -245,6 +246,10 @@ fn rebalance(
                 }
                 _ => oracle::read(&od, m)?,
             }
+        } else if oracle::is_two_obs(m.window_secs) {
+            // no stored venue point to read, and a 2-obs market never samples: no move
+            // (create_market refuses these; this covers any created before it did)
+            None
         } else {
             // no ring anywhere: every rebalance samples the venue's current tick
             let tick = venue_tick(m, obs, pool, ps_pool)?;
@@ -500,15 +505,21 @@ fn create_market(program_id: &Address, accounts: &mut [AccountView], data: &[u8]
     );
     require(market.address() == &market_key, HookedError::InvalidPda)?;
 
-    // kind 0 keeps the ring; every other kind is verified against its venue pool and sampled now
+    // kind 0 keeps the ring; every other kind is verified against its venue pool and sampled now.
+    // A 2-obs market never samples, so it needs a ring that records: kinds 1-4 and stale rings are refused.
+    let now = Clock::get()?.unix_timestamp as u32;
+    let two_obs = oracle::is_two_obs(window);
     let venue_tick0 = if kind == KIND_RAYDIUM_CLMM {
         require(
             oracle_obs.owner() == &RAYDIUM_CLMM && oracle_pool.owner() == &RAYDIUM_CLMM,
             HookedError::InvalidOracle,
         )?;
-        oracle::check_header(&oracle_obs.try_borrow()?, oracle_pool.address())?;
+        let od = oracle_obs.try_borrow()?;
+        oracle::check_header(&od, oracle_pool.address())?;
+        require(!(two_obs && oracle::ring_is_stale(&od, now)), HookedError::TwoObsNeedsLiveRing)?;
         None
     } else {
+        require(!two_obs, HookedError::TwoObsNeedsLiveRing)?;
         Some(check_venue(kind, flag, oracle_obs, oracle_pool, tail.first())?)
     };
     require(
@@ -581,7 +592,6 @@ fn create_market(program_id: &Address, accounts: &mut [AccountView], data: &[u8]
     m.underlying_is_token0 = flag;
     m.bump = bump;
     m.oracle_kind = kind;
-    let now = Clock::get()?.unix_timestamp as u32;
     let (end, twap) = match venue_tick0 {
         Some(tick) => {
             // kinds 1-4: the sampled tick is the baseline; the first checkpoint anchors the window
@@ -590,7 +600,7 @@ fn create_market(program_id: &Address, accounts: &mut [AccountView], data: &[u8]
         }
         None => {
             let od = oracle_obs.try_borrow()?;
-            if oracle::ring_is_stale(&od, now) {
+            if oracle::samples(&od, m, now) {
                 // dead ring: start from the pool's own tick, sampling takes over from here
                 let tick = {
                     let pd = oracle_pool.try_borrow()?;

@@ -23,7 +23,7 @@ import { CatEmpty, CatFilter, useCatRows } from "../components/CatFilter";
 import { catOfView } from "../lib/category";
 import { usePrices } from "../hooks/price";
 import { HERO_MARKETS, MEME_MINT } from "../config";
-import { age, disparity, disparityLabel, marketTag, relation, siblingGroups, sortMarkets, thinSide, useSort, type Sort } from "../lib/order";
+import { age, disparity, disparityLabel, isHouse, marketTag, relation, siblingGroups, sortMarkets, thinSide, useSort, type Sort } from "../lib/order";
 import { eventRow, HouseRules, MarketBar, SortChips, TermChart, TraderList, type TRow } from "../components/Terminal";
 
 async function loadBoard(): Promise<MarketView[]> {
@@ -92,7 +92,9 @@ export default function Board() {
   const [sort, setSort] = useSort();
   const pins = usePins();
   const moves = useMemo(() => movesByMarket(feed.data), [feed.data]);
-  const house = HERO_MARKETS.map((k) => data?.find((v) => v.acct.key.toBase58() === k)).find((v): v is MarketView => !!v) ?? data?.[0];
+  // the hero is the house coin's market as soon as one exists (biggest pots first: loadBoard sorts by pots), else VITE_HERO_MARKETS
+  const house =
+    data?.find(isHouse) ?? HERO_MARKETS.map((k) => data?.find((v) => v.acct.key.toBase58() === k)).find((v): v is MarketView => !!v) ?? data?.[0];
   // a flat $100XBRO chart hands the hero to the biggest mover on the board; it comes back the moment $100XBRO moves again
   const mover = useMemo(() => (house && data && flatSeries(house) ? biggestMover(data, house) : null), [data, house]);
   const hero = mover?.v ?? house;
@@ -100,13 +102,15 @@ export default function Board() {
   const bucket = useMemo(() => (data ?? []).filter((v) => (!pinsOnly || pins.isPinned(v)) && (theme === "all" || themeOf(v) === theme)), [data, theme, pinsOnly, pins]);
   // Memes · Majors · Stonks on top of the bucket; counts are what this bucket holds
   const { cat, setCat, counts, filtered } = useCatRows(bucket, catOfView);
-  // the chosen order, siblings pulled up under their best-ranked member, pinned groups first (the ♥ promise: "keep it at the top")
+  // the chosen order, siblings pulled up under their best-ranked member; the house coin's group on top for everyone, then your
+  // pinned groups (the ♥ promise: "keep it at the top"), then the rest
   const statsState = stats.data ? "ok" : stats.loading ? "loading" : "error";
   const sorted = useMemo(() => sortMarkets(filtered, stats.data, sort), [filtered, stats.data, sort]);
   const groups = useMemo(() => {
     const gs = siblingGroups(sorted.rows);
-    const pinned = (g: (typeof gs)[number]) => [g.lead, ...g.siblings].some((v) => pins.isPinned(v));
-    return [...gs.filter(pinned), ...gs.filter((g) => !pinned(g))];
+    const house = (g: (typeof gs)[number]) => [g.lead, ...g.siblings].some(isHouse);
+    const pinned = (g: (typeof gs)[number]) => !house(g) && [g.lead, ...g.siblings].some((v) => pins.isPinned(v));
+    return [...gs.filter(house), ...gs.filter(pinned), ...gs.filter((g) => !house(g) && !pinned(g))];
   }, [sorted.rows, pins]);
   const pinnedCount = (data ?? []).filter((v) => pins.isPinned(v)).length;
   const count = (t: Theme) => (t === "all" ? (data?.length ?? 0) : (data ?? []).filter((v) => themeOf(v) === t).length);
@@ -586,6 +590,7 @@ function MarketRow({ v, all, lead, sibs, stat, moves }: { v: MarketView; all: Ma
           <span className="c-mkt-top">
             <b>${ticker}</b>
             <span className="muted">/{v.oracle.quote}</span>
+            {isHouse(v) && <span className="chip house-chip" title="The house coin: 30% of every fee on the site burns it">house coin</span>}
             {hot && <span className="hot-badge">HOT</span>}
             {lead ? <span className="chip sib-chip">sibling · {relation(v, lead)}</span> : sibs > 0 && <span className="chip sib-chip">+{sibs} sibling{sibs > 1 ? "s" : ""}</span>}
             {owed !== null && <span className="owed">{SIDE[owed]} owes</span>}

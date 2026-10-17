@@ -10,6 +10,8 @@ import { carriedCat, withCat } from "./components/CatFilter";
 import { Tape } from "./components/Live";
 import { Flash, useNow } from "./components/Pulse";
 import { BurnerWalletAdapter } from "./lib/burner";
+import { TrustWalletAdapter } from "@solana/wallet-adapter-trust";
+import { CoinbaseWalletAdapter } from "@solana/wallet-adapter-coinbase";
 import { usePoll } from "./hooks";
 import { fetchActive, fetchFeed, fetchWinners } from "./lib/feed";
 import { short, usd } from "./lib/format";
@@ -29,6 +31,9 @@ import WarPage, { NewWarPage, WarLobby, WatchPage } from "./pages/War";
 import WarAction from "./pages/WarAction";
 import { HERO_MARKET, NETWORK, RPC_URL } from "./config";
 import { Icon } from "./components/Icons";
+import { NguHero } from "./components/NguHero";
+import NguPage from "./pages/Ngu";
+import PresalePage from "./pages/Presale";
 
 type Theme = "auto" | "light" | "dark";
 function useTheme(): [Theme, () => void] {
@@ -236,7 +241,9 @@ export default function App() {
   // ?embed=1: the swap widget inside someone else's page (public/widget.js) — the card and the wallet, no tape, no masthead
   const embed = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("embed") === "1";
   // wallet-standard finds installed extensions on its own; the burner is the one wallet the site ships
-  const wallets = useMemo(() => [new BurnerWalletAdapter()], []);
+  // Wallet Standard wallets (Phantom, Solflare, Backpack, Jupiter, OKX, current Trust…) are found on their own; these two
+  // cover Trust and Coinbase extensions that still inject the legacy way. A standard wallet of the same name wins.
+  const wallets = useMemo(() => [new BurnerWalletAdapter(), new TrustWalletAdapter(), new CoinbaseWalletAdapter()], []);
   return (
     <ConnectionProvider endpoint={RPC_URL} config={{ commitment: "confirmed" }}>
       {/* autoConnect: the provider connects a wallet the user picks (and reconnects the last one). Removing it left
@@ -321,6 +328,7 @@ export default function App() {
                   )}
                 </div>
               </header>
+              {!onSwap && !embed && <NguHero />}
               <main>
                 <Routes>
                   <Route path="/" element={onWar ? <WarPage /> : onSwap || embed ? <SwapPage /> : <Board />} />
@@ -343,6 +351,8 @@ export default function App() {
                   <Route path="/meta" element={<MetaPage />} />
                   <Route path="/arena" element={<ArenaPage />} />
                   <Route path="/winners" element={<WinnersPage />} />
+                  <Route path="/ngu" element={<NguPage />} />
+                  <Route path="/presale" element={<PresalePage />} />
                   <Route path="/wrap" element={<WrapPage />} />
                   <Route path="/wrap/:mint" element={<WrapPage />} />
                   <Route
@@ -361,6 +371,9 @@ export default function App() {
               </main>
               {!onSwap && (
                 <footer className="agents">
+                  <a className="foot-tg" href="https://t.me/brokerx100">
+                    Telegram · t.me/brokerx100
+                  </a>
                   <span>Agents · every board is JSON:</span>
                   {ENDPOINTS.map((e) => (
                     <a key={e} href={e}>

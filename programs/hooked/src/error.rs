@@ -48,6 +48,9 @@ pub enum HookedError {
     InvalidSharingConfig,
     /// boost: a token account passed is not (mint, owner) the instruction requires.
     InvalidLaunchTokenAccount,
+    /// create_market: a 2-obs market (`window_secs` < CKPT_SPACING_SECS) only ever reads stored Raydium
+    /// CLMM observations, so it needs kind 0 and a ring that has recorded within RING_STALE_SECS.
+    TwoObsNeedsLiveRing,
 }
 
 impl From<HookedError> for ProgramError {

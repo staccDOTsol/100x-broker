@@ -56,7 +56,7 @@ const underlying = underlyingIsToken0 ? mint0 : mint1;
 if (process.env.UNDERLYING && underlying.toBase58() !== process.env.UNDERLYING) throw new Error("UNDERLYING is not one of the pool's two mints");
 
 // names/symbols come from the underlying's DAS record — identical to app/api/_lib/das.ts
-const DAS_RPC = process.env.DAS_RPC ?? (RPC.includes("helius") ? RPC : "https://mainnet.helius-rpc.com/?api-key=REDACTED");
+const DAS_RPC = process.env.DAS_RPC ?? (RPC.includes("helius") ? RPC : (process.env.HELIUS_RPC_URL ?? RPC));
 const das: any = await (await fetch(DAS_RPC, {
   method: "POST", headers: { "content-type": "application/json" },
   body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getAsset", params: { id: underlying.toBase58() } }),

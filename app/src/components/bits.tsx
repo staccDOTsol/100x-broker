@@ -164,9 +164,10 @@ export function WalletButton({ solo = false }: { solo?: boolean } = {}) {
   const [ob, setOb] = useState<"pick" | "done" | null>(null);
   const [obLamports, setObLamports] = useState<bigint | null>(null);
   const ref = useRef<HTMLDivElement>(null);
-  // first visit, no wallet: the "whoa" card shows itself once, a beat after the page settles
+  // first visit, no wallet: the "whoa" card shows itself once, a beat after the page settles. Not on /presale, whose
+  // whole point is that there's no wallet to connect.
   useEffect(() => {
-    if (solo || publicKey || seenOnboarding()) return;
+    if (solo || publicKey || seenOnboarding() || location.pathname.startsWith("/presale")) return;
     const t = setTimeout(() => setOb((o) => o ?? "pick"), 2500);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -357,6 +358,7 @@ export function WalletButton({ solo = false }: { solo?: boolean } = {}) {
                       Open in {l.name}
                     </a>
                   ))}
+                  <div className="none">Jupiter Mobile has no link for this: open its browser (the globe) and go to {location.host}.</div>
                 </>
               ) : ready.length ? null : (
                 <div className="none">No Solana wallet found in this browser.</div>

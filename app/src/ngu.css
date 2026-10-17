@@ -1,0 +1,308 @@
+/* /ngu page + the site-wide hero. Uses the site's tokens only. */
+.ngu-hero {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "kicker cta" "line cta" "sub cta";
+  align-items: center;
+  column-gap: 16px;
+  row-gap: 4px;
+  margin: 0 0 16px;
+  padding: 14px 18px;
+  border: 1.5px solid var(--ink);
+  border-radius: var(--r-2);
+  background: var(--up-wash);
+  color: var(--ink);
+  text-decoration: none;
+  transition: transform var(--t-fast) var(--ease-snap), box-shadow var(--t-fast);
+}
+a.ngu-hero:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 0 var(--rule-strong);
+}
+.ngu-hero-kicker {
+  grid-area: kicker;
+}
+.ngu-hero-line {
+  grid-area: line;
+  font-size: clamp(1.4rem, 3.6vw, 2.2rem);
+}
+.ngu-hero-line em {
+  font-style: normal;
+  color: var(--up-ink);
+}
+.ngu-hero-sub {
+  grid-area: sub;
+  font-size: var(--t-small);
+  color: var(--ink-2);
+}
+.ngu-hero-cta {
+  grid-area: cta;
+  font: 600 var(--t-small) / 1 var(--font-body);
+  padding: 10px 14px;
+  border-radius: var(--r-2);
+  background: var(--ink);
+  color: var(--paper);
+  white-space: nowrap;
+}
+@media (max-width: 640px) {
+  .ngu-hero {
+    grid-template-columns: 1fr;
+    grid-template-areas: "kicker" "line" "sub" "cta";
+  }
+  .ngu-hero-cta {
+    justify-self: start;
+    margin-top: 6px;
+  }
+}
+
+.ngu {
+  display: grid;
+  gap: 28px;
+  max-width: 980px;
+}
+.ngu h2 {
+  margin: 0 0 10px;
+}
+.ngu-top {
+  display: grid;
+  gap: 12px;
+}
+.ngu-title {
+  margin: 0;
+  font-size: var(--t-mega);
+}
+.ngu-lead {
+  margin: 0;
+  max-width: 62ch;
+  font-size: var(--t-lead);
+  color: var(--ink-2);
+}
+.ngu-pending {
+  justify-self: start;
+  padding: 6px 10px;
+  border: 1px dashed var(--rule);
+  border-radius: 999px;
+}
+.ngu-announce {
+  margin: 0;
+  padding: 16px 18px;
+  border-left: 3px solid var(--up);
+  background: var(--paper-2);
+  font: 400 var(--t-small) / 1.6 var(--font-mono);
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ngu-lessons {
+  margin: 0;
+  padding-left: 1.2em;
+  display: grid;
+  gap: 10px;
+  max-width: 72ch;
+}
+.ngu-split {
+  display: flex;
+  overflow: hidden;
+  margin-bottom: 14px;
+  border: 1.5px solid var(--ink);
+  border-radius: var(--r-2);
+  font: 600 var(--t-small) / 1 var(--font-body);
+}
+.ngu-split span {
+  padding: 12px 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ngu-split .burn {
+  background: var(--down-wash);
+  color: var(--down-ink);
+}
+.ngu-split .fr28 {
+  background: var(--paper-2);
+  border-left: 1.5px solid var(--ink);
+  border-right: 1.5px solid var(--ink);
+}
+.ngu-split .lp {
+  background: var(--up-wash);
+  color: var(--up-ink);
+}
+.ngu-howto b {
+  display: block;
+  font-size: 1.5rem;
+  margin-bottom: 6px;
+}
+.ngu-howto p {
+  margin: 0;
+}
+@media (max-width: 720px) {
+  .ngu-howto {
+    grid-template-columns: 1fr;
+  }
+}
+.ngu-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+.ngu-stat {
+  display: grid;
+  gap: 4px;
+}
+.ngu-stat .num {
+  font-size: 1.25rem;
+}
+.ngu-two {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+@media (max-width: 720px) {
+  .ngu-two {
+    grid-template-columns: 1fr;
+  }
+}
+.ngu-list {
+  margin: 0;
+  padding-left: 1.1em;
+  display: grid;
+  gap: 8px;
+}
+.ngu-disclose h2 {
+  margin: 0;
+}
+.ngu-disclose a {
+  color: inherit;
+}
+.ngu-history .num {
+  font-size: 1.6rem;
+}
+.ngu-foot {
+  margin: 8px 0 0;
+  font-size: var(--t-small);
+}
+.ngu-foot a {
+  color: inherit;
+}
+
+/* NGU-first header + buy/sell */
+.ngu-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  gap: 24px;
+  align-items: start;
+}
+@media (max-width: 860px) {
+  .ngu-head {
+    grid-template-columns: 1fr;
+  }
+}
+.ngu-id {
+  display: grid;
+  gap: 16px;
+}
+.ngu-brand {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+.ngu-brand img {
+  border-radius: 14px;
+}
+.ngu-name {
+  margin: 0;
+  font-size: clamp(2.2rem, 6vw, 3.6rem);
+}
+.ngu-rate {
+  display: grid;
+  gap: 2px;
+}
+.ngu-rate-v {
+  font-size: clamp(2rem, 6vw, 3.2rem);
+  color: var(--up-ink);
+}
+.ngu-trade {
+  display: grid;
+  gap: 14px;
+  position: sticky;
+  top: 12px;
+}
+.ngu-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border: 1.5px solid var(--ink);
+  border-radius: var(--r-2);
+  overflow: hidden;
+}
+.ngu-tabs button {
+  appearance: none;
+  border: 0;
+  padding: 10px;
+  background: transparent;
+  color: var(--ink);
+  font: 600 var(--t-small) / 1 var(--font-body);
+  cursor: pointer;
+}
+.ngu-tabs button.on {
+  background: var(--ink);
+  color: var(--paper);
+}
+.ngu-field {
+  display: grid;
+  gap: 6px;
+}
+.ngu-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+}
+.ngu-input input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: 500 1.5rem / 1.1 var(--font-mono);
+  outline: none;
+}
+.ngu-quick {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: var(--t-small);
+}
+.ngu-quick .muted {
+  margin-right: auto;
+}
+.ngu-quick .chip {
+  cursor: pointer;
+}
+.ngu-out {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 10px 12px;
+  border-radius: var(--r-2);
+  background: var(--up-wash);
+}
+.ngu-out .num {
+  font-size: 1.25rem;
+  color: var(--up-ink);
+}
+.ngu-terms {
+  font-size: var(--t-small);
+}
+.ngu-go {
+  width: 100%;
+}
+
+.ngu-chart {
+  height: 440px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  overflow: hidden;
+}

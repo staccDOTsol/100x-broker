@@ -1,6 +1,7 @@
 # 2-observation TWAP on every venue: program spec
 
-Status: spec, not implemented (2026-10-16). Owner's rule: a market's TWAP spans at most 2 observations. The only job of
+Status: spec (2026-10-16). Implemented but **not deployed**: "2-obs markets never sample" (section below), which covers the
+kind-0 part of step 1 and the refusals in step 5. The venue accumulators for kinds 2 and 4 are still spec. Owner's rule: a market's TWAP spans at most 2 observations. The only job of
 the TWAP is to defeat atomic price pushes, meaning a push and revert inside one transaction or one Jito bundle.
 
 ## What exists today
@@ -37,6 +38,12 @@ cost of the amount donated.
 
 None of the 12 live markets is kind 1–4 today. The router (`api/_lib/legs.ts`) and `/new` list on any venue, so new
 listings on PumpSwap, CPMM or Meteora pools are exposed from their first block.
+
+On kind 0 the table needs a ring that does **not** record the push. A Raydium swap that moves the tick stores an observation
+first (pre-swap tick, at most one per 15 s), so after an hour of silence the push itself makes the ring fresh and the poke
+reads the ring. This was checked on a fork of the deployed program on 2026-10-16: WBTC ring stale for 4340 s, then a
+2 SOL push swap and a poke in one tx. The ring wrote in that tx, the TWAP took the pre-swap tick, and the push moved it 0 ticks.
+The sampled read is reachable on kind 0 only when the pool's tick moves while its ring stays silent (a dead ring).
 
 ### Why "end at the newest stored checkpoint" is not enough on its own
 
@@ -101,6 +108,20 @@ In 2-obs mode, `rebalance` reads like this:
    ExtraAccountMetaList and in the optional trailing accounts of poke, redeem and settle_begin, the same way the oracle
    pool was added (`EXTRA_METAS`).
 
+### Implemented: 2-obs markets never sample (2026-10-16, not deployed)
+
+`oracle::is_two_obs(window_secs)` is `window_secs < CKPT_SPACING_SECS`. `oracle::samples(ring, m, now)` is the one routing
+test, used by both `rebalance` and `create_market`: sample only when the ring is stale **and** the market is not 2-obs.
+
+- `rebalance`, kind 0, 2-obs: always the ring read, whether or not the pool is passed or the ring is stale. A stale ring
+  returns the point already consumed, so `end.ts <= last_obs_ts` and nothing moves. No sample is taken and no checkpoint is
+  pushed. The first new stored observation is consumed as usual, and the whole move since the last one settles in one step.
+- `rebalance`, kinds 1–4, 2-obs: no move. `create_market` refuses these markets, and none exist on chain.
+- `create_market`, 2-obs: kinds 1–4 and a stale kind-0 ring fail with `TwoObsNeedsLiveRing` (0x1022). The check runs
+  before any account is created.
+- Markets with a window of 150 s or more: unchanged, and they still sample dead rings.
+- Tests: `oracle.rs` `two_obs_boundary` and `two_obs_stale_ring_waits_for_the_ring`; fork e2e `scripts/e2e-2obs-stale.ts`.
+
 ## Off-chain mirrors (same change)
 
 - `twapNow` / `sampledTwapQ32` in `app/src/lib/chain.ts`, `api/_lib/og.ts` and `scripts/keeper.ts`: a 2-obs read for
@@ -116,7 +137,7 @@ In 2-obs mode, `rebalance` reads like this:
   - CPMM: an in-place update within 15 s must read `(last_update_timestamp, cum)`, never `(block_timestamp, cum)`.
   - CPMM: wrapping across 2^64.
   - DLMM: cumulative → ticks for bin steps 1, 25 and 100.
-  - Kind 0: a stale ring in 2-obs mode means no move.
+  - Kind 0: a stale ring in 2-obs mode means no move. (done: `two_obs_stale_ring_waits_for_the_ring`)
 - Fork e2e for each of kinds 0, 2 and 4: a bundle of swap push → poke → redeem → swap revert must transfer 0. On kind 4
   this is the fork test that settles the open DLMM question.
 - `create_market` rejects kinds 1 and 3, and a stale kind-0 ring, when `window_secs < 150`.

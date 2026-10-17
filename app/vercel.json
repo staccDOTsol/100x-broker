@@ -58,10 +58,16 @@
     "api/warbot.ts": {
       "maxDuration": 60,
       "memory": 1024
+    },
+    "api/ngu-history.ts": {
+      "maxDuration": 60
     }
   },
   "rewrites": [
-    { "source": "/c/:mint", "destination": "https://wjvksitfxf9annmd.public.blob.vercel-storage.com/coins/:mint/meta.json" },
+    {
+      "source": "/c/:mint",
+      "destination": "https://wjvksitfxf9annmd.public.blob.vercel-storage.com/coins/:mint/meta.json"
+    },
     {
       "source": "/api",
       "destination": "/api/index"
@@ -89,6 +95,10 @@
     {
       "source": "/meta",
       "destination": "/api/page?meta=1"
+    },
+    {
+      "source": "/ngu",
+      "destination": "/api/page?ngu=1"
     },
     {
       "source": "/((?!api/).*)",

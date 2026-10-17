@@ -3748,6 +3748,7 @@ details.math summary { cursor: pointer; color: var(--ink-3); }
 .agents { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin-top: 40px; padding: 14px 0 0; border-top: 1px solid var(--rule); font-family: var(--font-mono); font-size: var(--t-meta); color: var(--ink-3); }
 .agents a { color: var(--ink-2); text-decoration: none; padding: 2px 6px; border: 1px solid var(--rule); border-radius: 4px; }
 .agents a:hover { color: var(--ink); border-color: var(--ink-2); }
+.agents a.foot-tg { color: var(--ink); border-color: var(--ink); font-weight: 600; margin-right: 10px; }
 
 /* =================== market page chart, big =================== */
 .chart.big svg { height: clamp(180px, 30vw, 300px); }

@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 : "${HOOKED_MEME_MINT:?set HOOKED_MEME_MINT=<memecoin CA>}"
-RPC="${RPC:-https://mainnet.helius-rpc.com/?api-key=REDACTED}"
+RPC="${RPC:?set RPC to a mainnet RPC URL}"
 PAYER="${PAYER:-$HOME/hooked.json}"
 PROGRAM=9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6
 

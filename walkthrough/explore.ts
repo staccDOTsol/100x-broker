@@ -1,0 +1,11 @@
+import { chromium } from "playwright-core";
+const browser = await chromium.launch({ executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless: true });
+const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
+page.on("console", (m) => { if (m.type() === "error") console.log("console:", m.text().slice(0, 160)); });
+await page.goto(process.argv[2] ?? "http://localhost:5173/swap", { waitUntil: "networkidle", timeout: 60_000 }).catch((e) => console.log("goto:", e.message));
+await page.waitForTimeout(4000);
+await page.screenshot({ path: `shots/${process.argv[3] ?? "swap"}.png` });
+const buttons = await page.locator("button, a.btn, [role=button]").evaluateAll((els) => els.map((e) => (e.textContent || "").trim().replace(/\s+/g, " ").slice(0, 40)).filter(Boolean));
+console.log("buttons:", JSON.stringify([...new Set(buttons)].slice(0, 40)));
+console.log("inputs:", JSON.stringify(await page.locator("input").evaluateAll((els) => els.map((e) => (e as HTMLInputElement).getAttribute("aria-label") || (e as HTMLInputElement).placeholder))));
+await browser.close();

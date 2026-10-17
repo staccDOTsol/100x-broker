@@ -1,0 +1,10 @@
+{
+  "name": "walkthrough",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@solana/web3.js": "1.98.4",
+    "bs58": "6",
+    "playwright-core": "1.55.0"
+  }
+}
