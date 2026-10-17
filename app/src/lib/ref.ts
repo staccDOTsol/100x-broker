@@ -41,6 +41,15 @@ export function shareUrl(path: string, wallet: PublicKey | null) {
   u.searchParams.set("s", String(Math.floor(Date.now() / 300_000)));
   return u.toString();
 }
+/** Same referral param, on the swap host, opened on the pair being shared. */
+export function swapShareUrl(wallet: PublicKey | null, pay: string, recv: string) {
+  const u = new URL("https://swap.100x.broker/");
+  if (wallet) u.searchParams.set(KEY, wallet.toBase58());
+  u.searchParams.set("pay", pay);
+  u.searchParams.set("recv", recv);
+  u.searchParams.set("s", String(Math.floor(Date.now() / 300_000)));
+  return u.toString();
+}
 export function tweetUrl(text: string, url: string) {
   return `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`;
 }

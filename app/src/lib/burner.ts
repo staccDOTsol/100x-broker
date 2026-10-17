@@ -49,7 +49,7 @@ export class BurnerWalletAdapter extends BaseMessageSignerWalletAdapter {
   url = SITE_URL;
   icon = ICON;
   readyState = WalletReadyState.Loadable;
-  readonly supportedTransactionVersions: ReadonlySet<TransactionVersion> = new Set(["legacy", 0]);
+  readonly supportedTransactionVersions: ReadonlySet<TransactionVersion> = new Set(["legacy", 0, 1]);
   /** False when localStorage refused the write: the key is in memory only and dies with the tab. */
   persisted = true;
   private _keypair: Keypair | null = null;

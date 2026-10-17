@@ -25,7 +25,7 @@ import Decimal from "decimal.js";
 import bs58 from "bs58";
 import { SwapMode } from "@meteora-ag/dynamic-bonding-curve-sdk";
 import BN from "bn.js";
-import { buildSettleTx, conn, dbc, decodeMarket, marketsForOracle, oracleHealth, quoteSymbolOf, settleAmount, toV0, userBalances, type MarketView } from "../src/lib/chain.js";
+import { buildSettleTx, conn, dbc, decodeMarket, defaultWindowSecs, marketsForOracle, oracleHealth, quoteSymbolOf, twoObsSafe, settleAmount, toV0, userBalances, type MarketView } from "../src/lib/chain.js";
 import { claimFeesIx, createMarketIx, cu, marketPda, pokeIx, sideAccounts, type MarketKeys } from "../src/lib/hooked.js";
 import { VENUE_LABEL, candidateEffectiveQuote, candidateMove1PctQuote, candidateMove1PctUsd, candidateTvlUsd, decodeVenuePool, discoverPools, patchPoolVolumes, poolsMissingVolume, pumpSwapEffectiveQuote, pumpSwapVirtualQuote, tokenAmount, type PoolCandidate } from "../src/lib/venues.js";
 import { marketCurve } from "../src/lib/curve.js";
@@ -40,6 +40,7 @@ import { ARENA } from "../src/arena.js";
 import { activeWallets } from "./_lib/feed.js";
 import { allViews } from "./_lib/views.js";
 import { memo, peek } from "./_lib/memo.js";
+import { vanityKeypairs } from "./_lib/vanity.js";
 import { poolVolumes } from "./_lib/poolvol.js";
 
 // arena memo windows (ms): 15 s fresh, served stale for two minutes while one background refresh runs
@@ -165,6 +166,7 @@ const listRow = (v: MarketView, tvl?: number) => ({
   symbol: stem(v),
   ticker: v.ticker,
   mint: v.underlyingMint,
+  category: v.category, // meme | major | stonk | stable | other (src/lib/category.ts)
   market: v.acct.key.toBase58(),
   oracle: { spot: v.oracle.spot, twap: v.oracle.twap, quote: v.oracle.quote, venue: v.oracle.venue, pool: v.keys.oraclePool.toBase58(), pool_tvl_usd: tvl ?? null, thin: tvl !== undefined && tvl < THIN_ORACLE_USD },
   risk: oracleRisk(tvl),
@@ -269,13 +271,13 @@ async function book(owner: PublicKey, all: MarketView[], pool: PoolState, vs: Va
   const rfstacc = Number(amountOf(infos[1]?.data)) / 1e9;
   // mark each bag at what the Sell button would pay right now (exit router: curve for what it absorbs, pot for the rest),
   // not at marginal price × units — a curve at its floor marks a fresh buy near zero that way, and sells for ~92%
-  const pos: { market: string; ticker: string; side: string; symbol: string; units: number; worth_sol: number; via: string }[] = [];
+  const pos: { market: string; ticker: string; category: MarketView["category"]; side: string; symbol: string; units: number; worth_sol: number; via: string }[] = [];
   for (let i = 0; i < positions.length; i += 3) {
     pos.push(
       ...(await Promise.all(
         positions.slice(i, i + 3).map(async (p) => {
           const val = positionValue(p);
-          const base = { market: p.v.acct.key.toBase58(), ticker: p.v.ticker, side: p.side ? "DOWN" : "UP", symbol: p.v.side[p.side].symbol, units: val.units };
+          const base = { market: p.v.acct.key.toBase58(), ticker: p.v.ticker, category: p.v.category, side: p.side ? "DOWN" : "UP", symbol: p.v.side[p.side].symbol, units: val.units };
           try {
             const plan = await planExit(p.v, p.side, p.amt);
             const out = Number(withdrawOut(pool, plan.sellOut + plan.redeemOut)) / 1e9;
@@ -652,7 +654,7 @@ async function buildSeedPool(payer: PublicKey, poolId: PublicKey, sol: number, r
 
 /** Curve config + UP curve + DOWN curve + market: the /new page's four transactions. `keys` lets a half-done listing resume.
  *  `q` is a mint or a pool on any venue (Raydium CLMM/CPMM, PumpSwap, Meteora DAMM v2/DLMM); a pool pins the oracle to it. */
-async function buildCreateMarket(payer: PublicKey, q: string, windowSecs: number, keysIn: { bull: string; bear: string; config: string } | undefined, force: boolean) {
+async function buildCreateMarket(payer: PublicKey, q: string, windowIn: number | undefined, keysIn: { bull: string; bear: string; config: string } | undefined, force: boolean) {
   const info = await conn.getAccountInfo(new PublicKey(q));
   if (!info) throw new Error("no account at that address");
   let mint: PublicKey;
@@ -663,10 +665,19 @@ async function buildCreateMarket(payer: PublicKey, q: string, windowSecs: number
     pinned = new PublicKey(q);
   } else if (info.data.length >= 82) mint = new PublicKey(q);
   else throw new Error("that is neither a token mint nor a pool (Raydium CLMM/CPMM, PumpSwap, Meteora DAMM v2/DLMM)");
-  if (!(windowSecs >= 600 && windowSecs <= 86_400)) throw new Error("window must be 600–86400 seconds (default 3960)");
   const rows = await oracleCandidates(mint, pinned ?? undefined);
   const pool = pinned ? rows.find((r) => r.pool.equals(pinned!)) : rows[0];
   if (!pool) throw new Error(pinned ? "that pool is not quoted in SOL/USDC/USDT (or does not hold this coin)" : "no pool against SOL/USDC/USDT for this coin on Raydium (CLMM/CPMM), PumpSwap or Meteora (DAMM v2/DLMM) — create-pool first");
+  // 2-observation TWAP where the market reads a live Raydium ring; a short window anywhere else is spot (chain.ts twoObsSafe)
+  const ringed = twoObsSafe(pool.venue, pool.health);
+  const windowSecs = windowIn ?? defaultWindowSecs(pool.venue, pool.health);
+  if (ringed ? !(windowSecs >= 1 && windowSecs <= 86_400) : !(windowSecs >= 600 && windowSecs <= 86_400)) {
+    throw new Error(
+      ringed
+        ? "window must be 1–86400 seconds (default 1 = 2-observation TWAP)"
+        : `window must be 600–86400 seconds on ${pool.venue === "clmm" ? "a Raydium pool whose observation ring is dead" : VENUE_LABEL[pool.venue]} (default 3960): the program samples this pool's live tick, so a shorter window reads spot price`,
+    );
+  }
   if (!pool.usable && !force) {
     throw new Error(
       pool.venue === "clmm"
@@ -676,7 +687,11 @@ async function buildCreateMarket(payer: PublicKey, q: string, windowSecs: number
   }
   const kp = keysIn
     ? { bull: Keypair.fromSecretKey(bs58.decode(keysIn.bull)), bear: Keypair.fromSecretKey(bs58.decode(keysIn.bear)), config: Keypair.fromSecretKey(bs58.decode(keysIn.config)) }
-    : { bull: Keypair.generate(), bear: Keypair.generate(), config: Keypair.generate() };
+    : await (async () => {
+        // fresh mints come from the 1oox vanity stockpile; the curve config is any keypair
+        const [b, r] = await vanityKeypairs(2);
+        return { bull: Keypair.fromSecretKey(Uint8Array.from(b.secret)), bear: Keypair.fromSecretKey(Uint8Array.from(r.secret)), config: Keypair.generate() };
+      })();
   const flag = pool.flag;
   // the market PDA commits to the oracle_obs slot (CLMM ring / PumpSwap base ATA / CPMM token-0 vault / Meteora pool); kinds 1/2 pass the venue pool as the trailing account
   const keys: MarketKeys = {
@@ -855,7 +870,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     if (kind === "create-pool") return res.setHeader("cache-control", "no-store").json(await buildCreatePool(payer, new PublicKey(String(body.mint)), Number(body.sol), body.fee_index === undefined ? 1 : Number(body.fee_index)));
     if (kind === "seed-pool") return res.setHeader("cache-control", "no-store").json(await buildSeedPool(payer, new PublicKey(String(body.pool)), Number(body.sol), body.range === undefined ? 4 : Number(body.range)));
-    if (kind === "create-market") return res.setHeader("cache-control", "no-store").json(await buildCreateMarket(payer, String(body.pool ?? body.mint ?? ""), body.window === undefined ? 3960 : Number(body.window), body.keys, body.force === true));
+    if (kind === "create-market") return res.setHeader("cache-control", "no-store").json(await buildCreateMarket(payer, String(body.pool ?? body.mint ?? ""), body.window === undefined ? undefined : Number(body.window), body.keys, body.force === true));
     if (kind === "create-vault") return res.setHeader("cache-control", "no-store").json(await buildCreateVault(payer, new PublicKey(String(body.market)), Number(body.band_bps ?? 1500), Number(body.max_loss_bps ?? 300), Number(body.keeper_bps ?? 100)));
     if (kind === "poke") return res.setHeader("cache-control", "no-store").json(await buildPoke(payer, resolveMarket(await markets(), String(body.market ?? ""))));
     if (kind === "settle" || kind === "claim") {

@@ -56,12 +56,12 @@ function label(p: MetaPick): string {
   return words.slice(0, 3).join(" ") + (words.length > 3 ? "…" : "");
 }
 
-/** Where the one button goes. UP/DOWN preselect the side (?side=0|1); VAULT goes to the vault, or the market's vault panel while it's being born. */
+/** Where the one button goes. UP/DOWN preselect the side (?side=0|1); VAULT preselects Yield (?side=yield, which falls back to Long while the vault is being born). */
 function actionPath(p: MetaPick): string | null {
   if (!p.market) return null;
   if (p.side === "UP") return `/m/${p.market}?side=0`;
   if (p.side === "DOWN") return `/m/${p.market}?side=1`;
-  return p.vault ? `/yield/${p.vault}` : `/m/${p.market}#dn`;
+  return `/m/${p.market}?side=yield`;
 }
 
 /** The tweet: real leverage when the view is here, the bare side otherwise. Never a made-up number. */

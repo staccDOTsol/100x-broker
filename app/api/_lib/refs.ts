@@ -2,8 +2,9 @@
 // Mechanism (same as /api/ref): a referred wallet's SOL enters through the stake pool's DepositSol with the referrer's r-fstacc
 // account as the referral fee account; the pool pays it 50% of the 0.1% deposit fee. Self-referrals and the dev account
 // (the site's default referrer, i.e. unreferred traffic) are left out. Incremental like the winner feed: baseline file + scan.
-import { Connection, PublicKey, type ParsedInstruction, type PartiallyDecodedInstruction } from "@solana/web3.js";
+import { PublicKey, type ParsedInstruction, type PartiallyDecodedInstruction } from "@solana/web3.js";
 import bs58 from "bs58";
+import { serverConnection } from "../../src/lib/upstream.js";
 
 const POOL = new PublicKey("SzoSoRxsrL9sbFcwpbjbH5bRrzuvFtuytZTeuqZCfQ6");
 const STAKE_POOL_PROGRAM = "SP12tWFxD9oJsVWNavTTBZvMbA6gkAmxtVgxdqvyvhY";
@@ -42,7 +43,7 @@ export async function scanRefs(prev: RefState | null, opts: { maxSigs?: number; 
   const st: RefState = prev ? { ...prev, hits: [...prev.hits] } : emptyRefs();
   const url = process.env.HELIUS_RPC_URL;
   if (!url) throw new Error("HELIUS_RPC_URL not configured");
-  const c = new Connection(url, "confirmed");
+  const c = serverConnection();
   const max = opts.maxSigs ?? 3000;
   const sigs: string[] = [];
   let before: string | undefined;

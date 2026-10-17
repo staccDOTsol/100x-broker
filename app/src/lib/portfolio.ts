@@ -18,7 +18,7 @@ export async function loadPortfolio(owner: PublicKey): Promise<Book> {
     const keys = await listMarketKeys();
     return (await Promise.all(keys.map((k) => loadMarketView(k).catch(() => null)))).filter((v): v is MarketView => !!v);
   });
-  const addrs = [owner, getAssociatedTokenAddressSync(RFSTACC, owner), getAssociatedTokenAddressSync(MEME_MINT, owner)];
+  const addrs = [owner, getAssociatedTokenAddressSync(RFSTACC, owner), getAssociatedTokenAddressSync(MEME_MINT, owner, false, TOKEN_2022_PROGRAM_ID)]; // $100XBRO is a Token-2022 mint
   for (const v of markets) {
     addrs.push(
       getAssociatedTokenAddressSync(v.keys.bullMint, owner, false, TOKEN_2022_PROGRAM_ID),

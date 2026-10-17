@@ -8,7 +8,7 @@ import { STAKE_POOL } from "./zap.js";
 import { PROGRAM_ID as HOOKED, RFSTACC, WSOL } from "../config.js";
 import { positionAmounts, priceX64, sqrtPriceAtTick } from "./clmm-math.js";
 
-export const DN_PROGRAM = new PublicKey("2ZbjE44nSh3AmpREg4sdNMViBLAzAEtFKYDn1XdqMzEj");
+export const DN_PROGRAM = new PublicKey("63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU");
 export const RAYDIUM_CLMM = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
 const MEMO = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 const VAULT_DISC = Buffer.from("dnvault1");
@@ -87,6 +87,15 @@ export type VaultView = { v: Vault; m: MarketBits; x: Valuation; underlying: str
 export async function vaultsForMarket(market: PublicKey): Promise<Vault[]> {
   const res = await conn.getProgramAccounts(DN_PROGRAM, {
     filters: [{ memcmp: { offset: 0, bytes: "HoK4CZtz9b6" } }, { memcmp: { offset: 8, bytes: market.toBase58() } }],
+  });
+  return res.map((a) => decodeVault(a.pubkey, Buffer.from(a.account.data)));
+}
+
+/** Vaults on one Raydium pool (memcmp on the pool field at offset 40). A market whose coin is WSOL can't carry a vault (X can't be WSOL),
+ *  but its oracle pool can: the SOL/USDC vault is built on the sibling USDC market, same pool. */
+export async function vaultsForPool(pool: PublicKey): Promise<Vault[]> {
+  const res = await conn.getProgramAccounts(DN_PROGRAM, {
+    filters: [{ memcmp: { offset: 0, bytes: "HoK4CZtz9b6" } }, { memcmp: { offset: 40, bytes: pool.toBase58() } }],
   });
   return res.map((a) => decodeVault(a.pubkey, Buffer.from(a.account.data)));
 }

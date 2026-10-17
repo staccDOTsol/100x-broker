@@ -1,0 +1,11 @@
+node_modules
+dist
+.vercel
+.env*
+.tmp-*
+.smoke-*
+.devnet-*
+scripts
+tools
+tests
+**/*.test.ts

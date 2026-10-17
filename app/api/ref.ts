@@ -2,11 +2,12 @@
 // Mechanism: every SOL that enters through a referred wallet goes through the r-fstacc stake pool's DepositSol with the
 // referrer's r-fstacc account as the referral fee account; the pool pays it 50% of the 0.1% deposit fee, on-chain, per deposit.
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { Connection, PublicKey, type ParsedInstruction, type PartiallyDecodedInstruction } from "@solana/web3.js";
+import { PublicKey, type ParsedInstruction, type PartiallyDecodedInstruction } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import bs58 from "bs58";
 import { memo } from "./_lib/memo.js";
 import { parsedTxs, recentSigs } from "./_lib/txcache.js";
+import { serverConnection } from "../src/lib/upstream.js";
 
 const RFSTACC = new PublicKey("pSYRpDqr847kB2nD5ZhjcPsHLV2ZpUxweXm1MwiSTcc");
 const STAKE_POOL_PROGRAM = "SP12tWFxD9oJsVWNavTTBZvMbA6gkAmxtVgxdqvyvhY";
@@ -21,7 +22,7 @@ const ledger = (wallet: PublicKey) => memo(`ref:${wallet.toBase58()}`, 60_000, 1
 async function scan(wallet: PublicKey): Promise<{ scanned: number; hits: Hit[] }> {
   const url = process.env.HELIUS_RPC_URL;
   if (!url) throw new Error("HELIUS_RPC_URL not configured");
-  const conn = new Connection(url, "confirmed");
+  const conn = serverConnection();
   const ata = getAssociatedTokenAddressSync(RFSTACC, wallet);
   const sigs = await recentSigs(conn, ata, MAX_SIGS);
   const hits: Hit[] = [];

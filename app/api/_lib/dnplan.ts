@@ -19,11 +19,12 @@ import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, createAssociatedTokenAccountId
 import * as RaySdk from "@raydium-io/raydium-sdk-v2";
 import { DynamicBondingCurveClient, SwapMode } from "@meteora-ag/dynamic-bonding-curve-sdk";
 import { liquidityFromAmounts, positionAmounts, priceX64, sqrtPriceAtTick } from "./clmm-math.js";
+import { serverConnection } from "../../src/lib/upstream.js";
 
 const { ClmmInstrument, PersonalPositionLayout, PoolUtils, Raydium } = RaySdk as any;
 
-export const DN_PROGRAM = new PublicKey("2ZbjE44nSh3AmpREg4sdNMViBLAzAEtFKYDn1XdqMzEj");
-export const HOOKED = new PublicKey("T8EKHG9mJhwWNAYWisFKvbYynGMvSHP5Fb7kxSDh7cb");
+export const DN_PROGRAM = new PublicKey("63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU");
+export const HOOKED = new PublicKey("9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6");
 export const RFSTACC = new PublicKey("pSYRpDqr847kB2nD5ZhjcPsHLV2ZpUxweXm1MwiSTcc");
 export const WSOL = new PublicKey("So11111111111111111111111111111111111111112");
 export const STAKE_POOL = new PublicKey("SzoSoRxsrL9sbFcwpbjbH5bRrzuvFtuytZTeuqZCfQ6");
@@ -53,7 +54,7 @@ const amt = (d: Buffer | undefined | null) => (d && d.length >= 165 ? d.readBigU
 export const conn = () => {
   const u = process.env.HELIUS_RPC_URL;
   if (!u) throw new Error("HELIUS_RPC_URL not configured");
-  return new Connection(u, "confirmed");
+  return serverConnection();
 };
 
 // ---------- state ----------

@@ -5,8 +5,10 @@ import { usePoll } from "../hooks";
 import { ago, short } from "../lib/format";
 import { CardShare, Tweet } from "../components/Share";
 import { Flash, Rolling } from "../components/Pulse";
+import { CatFilter, useCat, type Counts } from "../components/CatFilter";
+import { CATS, CAT_PLURAL, type Cat, type Category } from "../lib/category";
 
-type Pos = { market: string; ticker: string; side: "UP" | "DOWN"; symbol: string; units: number; worth_sol: number; via: "curve" | "pot" };
+type Pos = { market: string; ticker: string; side: "UP" | "DOWN"; symbol: string; units: number; worth_sol: number; via: "curve" | "pot"; category: Category };
 type Row = {
   name: string; model: string; wallet: string; seed: number; joined: string; cohort: string;
   sol: number; rfstacc: number; positions: Pos[]; positions_sol: number; equity_sol: number; net_sol: number; ret: number; trades: number; last: number | null;
@@ -36,11 +38,13 @@ function Stat({ label, tweet, cls = "", children, sub }: { label: string; tweet:
   );
 }
 
-function AgentCard({ a, rank }: { a: Row; rank: number }) {
+function AgentCard({ a, rank, cat }: { a: Row; rank: number; cat: Cat | null }) {
   const nav = useNavigate();
   const to = `/p/${a.wallet}`;
   const who = a.name || short(a.wallet);
   const t = tone(a.net_sol);
+  // with a category on, this bot's other bags step back so the ones in the category read first
+  const bags = cat ? [...a.positions].sort((x, y) => Number(y.category === cat) - Number(x.category === cat)) : a.positions;
   return (
     <article
       className={`card agent-card ${rank === 1 && a.net_sol > 0 ? "hot" : ""}`.trim()}
@@ -71,8 +75,8 @@ function AgentCard({ a, rank }: { a: Row; rank: number }) {
       </div>
       <div className="agent-bags">
         {a.positions.length === 0 && <span className="chip muted">flat</span>}
-        {a.positions.map((p) => (
-          <Link key={`${p.market}:${p.side}`} to={`/m/${p.market}?side=${p.side === "UP" ? 0 : 1}`} className={`chip ${p.side === "UP" ? "up" : "down"}`} onClick={stop}>
+        {bags.map((p) => (
+          <Link key={`${p.market}:${p.side}`} to={`/m/${p.market}?side=${p.side === "UP" ? 0 : 1}`} className={`chip ${p.side === "UP" ? "up" : "down"}${cat && p.category !== cat ? " muted" : ""}`} onClick={stop}>
             {p.ticker} {p.side} · {sol(p.worth_sol, 2)}
           </Link>
         ))}
@@ -87,7 +91,12 @@ function AgentCard({ a, rank }: { a: Row; rank: number }) {
 
 export default function ArenaPage() {
   const { data, error, loading } = usePoll(load, [], 15_000);
-  const rows = data?.agents ?? [];
+  const [cat, setCat] = useCat();
+  const all = data?.agents ?? [];
+  // Memes · Majors · Stonks: bots holding at least one bag in the category; counts are bots, not bags
+  const counts: Counts = { all: all.length, meme: 0, major: 0, stonk: 0 };
+  for (const a of all) for (const c of CATS) if (a.positions.some((p) => p.category === c)) counts[c]++;
+  const rows = cat ? all.filter((a) => a.positions.some((p) => p.category === cat)) : all;
   const cohorts = data?.cohorts ?? [];
   const n = cohorts.reduce((t, c) => t + c.agents, 0);
   const net = cohorts.reduce((t, c) => t + c.net_sol, 0);
@@ -135,12 +144,25 @@ export default function ArenaPage() {
       )}
 
       <section className="arena" aria-label="Arena leaderboard">
+        {all.length > 0 && (
+          <div className="meta arena-bar">
+            <span>{cat ? `Bots holding ${CAT_PLURAL[cat]}` : "Every bot"}</span>
+            <CatFilter cat={cat} onChange={setCat} counts={counts} />
+          </div>
+        )}
         {rows.length > 0 ? (
           <div className="cards arena-cards">
-            {rows.map((a, i) => (
-              <AgentCard key={a.wallet} a={a} rank={i + 1} />
+            {rows.map((a) => (
+              <AgentCard key={a.wallet} a={a} rank={all.indexOf(a) + 1} cat={cat} />
             ))}
           </div>
+        ) : all.length > 0 && cat ? (
+          <p className="meta cat-empty">
+            No bot holds {CAT_PLURAL[cat]} ·{" "}
+            <Link to={`/?cat=${cat}`} className="runners-cta">
+              be the first →
+            </Link>
+          </p>
         ) : loading && !data ? (
           <div className="cards arena-cards" aria-busy="true" aria-label="Loading">
             {[0, 1, 2].map((i) => (
