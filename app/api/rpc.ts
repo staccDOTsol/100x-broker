@@ -8,7 +8,8 @@ const ALLOWED = new Set([
   "getTokenAccountsByOwner", "getMinimumBalanceForRentExemption", "getSlot", "getBlockTime", "getEpochInfo",
   "getFeeForMessage", "getRecentPrioritizationFees", "getGenesisHash", "getVersion", "getTransaction", "getAsset",
 ]);
-const PROGRAM_ID = process.env.VITE_PROGRAM_ID ?? "9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6";
+import { ALT_AUTHORITY, HISTORY_PROGRAM_IDS, HISTORY_DN_PROGRAM_IDS } from "../src/config.js";
+const PROGRAM_IDS = [...HISTORY_PROGRAM_IDS, ...HISTORY_DN_PROGRAM_IDS].map((p) => p.toBase58());
 const DBC = "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN";
 
 // routing and failover live in src/lib/upstream.ts (shared with every server Connection)
@@ -36,8 +37,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const altScan =
       c.params?.[0] === "AddressLookupTab1e1111111111111111111111111" &&
       Array.isArray(c.params?.[1]?.filters) &&
-      c.params[1].filters.some((f: any) => f?.memcmp?.offset === 22 && f?.memcmp?.bytes === "EGa3ng1xcuB5X9tkK7czYczhD4PpAYAJF52Vo9F2Cn7");
-    if (c.method === "getProgramAccounts" && !altScan && ![PROGRAM_ID, DBC, "63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU"].includes(c.params?.[0])) {
+      c.params[1].filters.some((f: any) => f?.memcmp?.offset === 22 && f?.memcmp?.bytes === ALT_AUTHORITY.toBase58());
+    if (c.method === "getProgramAccounts" && !altScan && ![...PROGRAM_IDS, DBC].includes(c.params?.[0])) {
       return res.status(400).json({ error: "getProgramAccounts limited to 100x programs" });
     }
   }

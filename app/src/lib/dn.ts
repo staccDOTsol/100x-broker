@@ -5,10 +5,11 @@ import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, createAssociatedTokenAccountId
 import { conn } from "./chain.js";
 import { metaPda } from "./hooked.js";
 import { STAKE_POOL } from "./zap.js";
-import { PROGRAM_ID as HOOKED, RFSTACC, WSOL } from "../config.js";
+import { PROGRAM_ID as HOOKED, DN_PROGRAM_ID, CLOSED_PROGRAM_IDS, RFSTACC, WSOL } from "../config.js";
 import { positionAmounts, priceX64, sqrtPriceAtTick } from "./clmm-math.js";
 
-export const DN_PROGRAM = new PublicKey("63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU");
+export const DN_PROGRAM = DN_PROGRAM_ID;
+import { assertProgramAvailable, LEGACY_UNAVAILABLE } from "./deployment.js";
 export const RAYDIUM_CLMM = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
 const MEMO = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 const VAULT_DISC = Buffer.from("dnvault1");
@@ -54,6 +55,7 @@ export function decodeVault(key: PublicKey, d: Buffer): Vault {
 }
 export async function listVaults(): Promise<Vault[]> {
   // "dnvault1" in base58, precomputed so the bundle needs no bs58 dependency
+  await assertProgramAvailable(conn, DN_PROGRAM);
   const res = await conn.getProgramAccounts(DN_PROGRAM, { filters: [{ memcmp: { offset: 0, bytes: "HoK4CZtz9b6" } }] });
   return res.map((a) => decodeVault(a.pubkey, Buffer.from(a.account.data)));
 }
@@ -85,6 +87,7 @@ export type VaultView = { v: Vault; m: MarketBits; x: Valuation; underlying: str
 
 /** Vaults built on one market (memcmp on the market field at offset 8); usually zero or one. */
 export async function vaultsForMarket(market: PublicKey): Promise<Vault[]> {
+  await assertProgramAvailable(conn, DN_PROGRAM);
   const res = await conn.getProgramAccounts(DN_PROGRAM, {
     filters: [{ memcmp: { offset: 0, bytes: "HoK4CZtz9b6" } }, { memcmp: { offset: 8, bytes: market.toBase58() } }],
   });
@@ -94,6 +97,7 @@ export async function vaultsForMarket(market: PublicKey): Promise<Vault[]> {
 /** Vaults on one Raydium pool (memcmp on the pool field at offset 40). A market whose coin is WSOL can't carry a vault (X can't be WSOL),
  *  but its oracle pool can: the SOL/USDC vault is built on the sibling USDC market, same pool. */
 export async function vaultsForPool(pool: PublicKey): Promise<Vault[]> {
+  await assertProgramAvailable(conn, DN_PROGRAM);
   const res = await conn.getProgramAccounts(DN_PROGRAM, {
     filters: [{ memcmp: { offset: 0, bytes: "HoK4CZtz9b6" } }, { memcmp: { offset: 40, bytes: pool.toBase58() } }],
   });
@@ -103,6 +107,7 @@ export async function vaultsForPool(pool: PublicKey): Promise<Vault[]> {
 /** One vault by address (null when the account is not a vault). */
 export async function findVault(key: PublicKey): Promise<Vault | null> {
   const info = await conn.getAccountInfo(key);
+  if (info && CLOSED_PROGRAM_IDS.has(info.owner.toBase58())) throw new Error(LEGACY_UNAVAILABLE);
   if (!info || !info.owner.equals(DN_PROGRAM)) return null;
   try {
     return decodeVault(key, Buffer.from(info.data));
@@ -113,6 +118,7 @@ export async function findVault(key: PublicKey): Promise<Vault | null> {
 
 /** Everything the page needs for one vault, in two RPC round trips. */
 export async function loadVault(v: Vault, createdTs: number | null): Promise<VaultView> {
+  await assertProgramAvailable(conn, DN_PROGRAM);
   const md = await conn.getAccountInfo(v.market);
   if (!md) throw new Error("market missing");
   const m = decodeMarket(Buffer.from(md.data));

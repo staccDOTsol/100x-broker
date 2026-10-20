@@ -291,6 +291,11 @@ export async function planLegs(args: { wallet: string | null; hops: HopIn[]; bad
     });
     total += budget;
   });
+  for (const h of hops) {
+    for (const t of [h.long, h.short]) {
+      if (t.via === "none") unplaceable.push({ mint: t.mint, reason: `hop ${h.hop} ${t.bet}: ${t.note ?? "no available market"}` });
+    }
+  }
   const plan: LegsPlan = {
     houseBps: Number(HOUSE_BPS), legBps: Number(LEG_BPS), badBeat: args.badBeat, hops, totalLamports: total.toString(),
     listings: [], txs: [], txLabels: [], txBets: [], pending: [], unplaceable,

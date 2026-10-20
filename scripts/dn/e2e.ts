@@ -7,9 +7,12 @@ import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from "@solana/web3.j
 import { createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { RFSTACC, type Market, sideAccounts } from "../lib";
 import { DN_PROGRAM, WSOL, bindPositionIx, createVaultIx, decodeMarketBits, depositIx, downHookExtras, hedgeDelta, readVault, valAccounts, valuation, withdrawIx, wrapIx, type VaultState } from "./lib";
-import { dbcClient, decreaseIx, ensureAtas, hedgeBuyIxs, loadRay, openPositionIxs, poolCtx, quoteBuy, rebalanceTx, send, swapIx, vaultAlt } from "./ops";
+import { dbcClient, decreaseIx, ensureAtas, hedgeBuyIxs, loadRay, openPositionIxs, poolCtx, quoteBuy, rebalanceTx, send, swapIx, vaultAccounts } from "./ops";
+import { ensureAlt } from "../alt";
 
 const RPC = process.env.RPC ?? "http://127.0.0.1:8899";
+const rpcUrl = new URL(RPC);
+if (rpcUrl.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(rpcUrl.hostname)) throw new Error("dn/e2e.ts only runs on a local fork");
 const conn = new Connection(RPC, "confirmed");
 const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(new URL("../test-payer.json", import.meta.url), "utf8"))));
 const MARKET = new PublicKey(process.env.MARKET ?? "GwzRwcPYSojZiNc4tC4eoLSLD7htk3akWA7qtG68zyHh");
@@ -67,8 +70,10 @@ if (shares !== DEP) throw new Error(`first deposit should mint 1:1, got ${shares
 
 // tables
 const mainAlt = (await conn.getAddressLookupTable(MAIN_ALT)).value!;
-const alt = await vaultAlt(conn, payer, null, v, [new PublicKey(ctx.poolKeys.vault.A), new PublicKey(ctx.poolKeys.vault.B), ctx.compute.observationId, new PublicKey(ctx.poolInfo.mintA.address), new PublicKey(ctx.poolInfo.mintB.address)]);
-const tables = [mainAlt, ...alt];
+const altKey = await ensureAlt(conn, payer, null, await vaultAccounts(conn, v, [new PublicKey(ctx.poolKeys.vault.A), new PublicKey(ctx.poolKeys.vault.B), ctx.compute.observationId, new PublicKey(ctx.poolInfo.mintA.address), new PublicKey(ctx.poolInfo.mintB.address)]));
+await new Promise((resolve) => setTimeout(resolve, 1500));
+const alt = (await conn.getAddressLookupTable(altKey)).value!;
+const tables = [...(mainAlt ? [mainAlt] : []), alt];
 
 // 3. wrap + swap half to X + buy the hedge, all in one tx (settle refuses unhedged exposure)
 const deploy = (DEP * 95n) / 100n;

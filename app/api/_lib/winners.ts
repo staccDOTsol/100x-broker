@@ -19,7 +19,7 @@ import { listVaults, type Vault } from "../../src/lib/dn.js";
 import { poolState } from "../../src/lib/zap.js";
 import { serverConnection } from "../../src/lib/upstream.js";
 
-const DN_PROGRAM = "63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU";
+import { HISTORY_DN_PROGRAM_IDS } from "../../src/config.js";
 const MEMO_TAG = "100x.broker 0/20";
 const FOLLOW_SECS = 900; // an unpark's zap-out lands within minutes of the in-kind withdraw
 
@@ -176,7 +176,7 @@ async function unparkProceeds(
     "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
     "SP12tWFxD9oJsVWNavTTBZvMbA6gkAmxtVgxdqvyvhY",
   ]);
-  const dn = new Set([DN_PROGRAM]);
+  const dn = new Set(HISTORY_DN_PROGRAM_IDS.map((p) => p.toBase58()));
   const sigs: string[] = [];
   let before: string | undefined;
   for (let page = 0; page < 5; page++) {

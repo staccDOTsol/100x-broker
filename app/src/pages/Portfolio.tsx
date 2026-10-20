@@ -259,6 +259,23 @@ function Bag({ owner, mine }: { owner: PublicKey; mine: boolean }) {
         </div>
       </header>
 
+      <section className="panel" style={{ padding: 20, marginBottom: 16 }} aria-label="Existing holdings from closed programs">
+        <h2>Existing holdings · closed programs</h2>
+        <p>These tokens remain in this wallet. Their programs are closed, so trading and withdrawals are unavailable.
+          Replacement markets do not unlock these assets. They are excluded from the active position values below.</p>
+        {!b ? <p>Checking existing holdings…</p> : b.legacyError ? <p role="alert">{b.legacyError}</p> : b.legacy.length ? (
+          <ul>
+            {b.legacy.map((p) => (
+              <li key={p.mint}>
+                <a href={`https://solscan.io/token/${p.mint}`} target="_blank" rel="noreferrer">{p.symbol}</a>{" "}
+                · {fmtAmount(p.amount, p.decimals)} · unavailable
+              </li>
+            ))}
+          </ul>
+        ) : <p>No UP/DOWN holdings or yield receipts from the closed programs found in this wallet.</p>}
+        {b?.activeError && <p role="alert">{b.activeError}</p>}
+      </section>
+
       <div className="bag-stats" aria-live="polite">
         <div className="panel stat-card">
           <span className="meta">On the table</span>

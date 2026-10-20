@@ -18,7 +18,7 @@ const WINDOW = Number(process.env.WINDOW_SECS ?? 1);
 const SITE = process.env.SITE ?? "https://100x.broker";
 const RAYDIUM_CLMM = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
 const WSOL = new PublicKey("So11111111111111111111111111111111111111112");
-const KEYS_FILE = process.env.MARKET_KEYS ?? `market-keys-${ORACLE_POOL.toBase58().slice(0, 8)}.json`;
+const KEYS_FILE = process.env.MARKET_KEYS ?? `market-keys-${PROGRAM_ID.toBase58()}-${ORACLE_POOL.toBase58().slice(0, 8)}.json`;
 
 const conn = new Connection(RPC, "confirmed");
 const payer = Keypair.fromSecretKey(
@@ -27,11 +27,18 @@ const payer = Keypair.fromSecretKey(
 const client = DynamicBondingCurveClient.create(conn, "confirmed");
 
 // persist the three keypairs so a partial run can resume with the same addresses
-type Saved = { bull: number[]; bear: number[]; config: number[] };
+const programInfo = await conn.getAccountInfo(PROGRAM_ID);
+if (!programInfo?.executable) throw new Error(`Hooked program ${PROGRAM_ID} is not deployed`);
+if (programInfo.owner.toBase58() === "BPFLoaderUpgradeab1e11111111111111111111111") {
+  const programData = new PublicKey(programInfo.data.subarray(4, 36));
+  if (!(await conn.getAccountInfo(programData))) throw new Error(`Hooked program ${PROGRAM_ID} is closed`);
+}
+type Saved = { programId?: string; bull: number[]; bear: number[]; config: number[] };
 const saved: Saved = fs.existsSync(KEYS_FILE)
   ? JSON.parse(fs.readFileSync(KEYS_FILE, "utf8"))
-  : { bull: [...Keypair.generate().secretKey], bear: [...Keypair.generate().secretKey], config: [...Keypair.generate().secretKey] };
-fs.writeFileSync(KEYS_FILE, JSON.stringify(saved));
+  : { programId: PROGRAM_ID.toBase58(), bull: [...Keypair.generate().secretKey], bear: [...Keypair.generate().secretKey], config: [...Keypair.generate().secretKey] };
+if (saved.programId !== PROGRAM_ID.toBase58()) throw new Error("MARKET_KEYS belongs to a different or legacy deployment; use a fresh file for this program ID");
+fs.writeFileSync(KEYS_FILE, JSON.stringify(saved), { mode: 0o600 });
 const bull = Keypair.fromSecretKey(Uint8Array.from(saved.bull));
 const bear = Keypair.fromSecretKey(Uint8Array.from(saved.bear));
 const configKp = Keypair.fromSecretKey(Uint8Array.from(saved.config));
@@ -41,14 +48,14 @@ if (!poolInfo || !poolInfo.owner.equals(RAYDIUM_CLMM)) throw new Error("ORACLE_P
 const mint0 = new PublicKey(poolInfo.data.subarray(73, 105));
 const mint1 = new PublicKey(poolInfo.data.subarray(105, 137));
 const obs = new PublicKey(poolInfo.data.subarray(201, 233));
-// A ring that has stored nothing for RING_STALE_SECS puts the market in sampling mode, where the end point is the pool's live
-// tick: a short window there is spot price. Raydium ring: 100 × 44-byte observations from byte 51, block_timestamp u32 first.
+// Two-observation markets require a live ring at creation and never sample spot after creation.
+// Retain the stricter legacy CLI guard for windows 150–599, whose program path still samples stale rings.
 if (WINDOW < 600) {
   const ring = (await conn.getAccountInfo(obs))?.data;
   let newest = 0;
   for (let i = 0; ring && i < 100; i++) newest = Math.max(newest, ring.readUInt32LE(51 + i * 44));
   const age = Math.floor(Date.now() / 1000) - newest;
-  if (!newest || age > 3600) throw new Error(`oracle ring ${obs.toBase58()} is dead (newest observation ${newest ? `${age} s` : "never"} old): the market would sample spot, so WINDOW_SECS must be ≥ 600 on this pool`);
+  if (!newest || age > 3600) throw new Error(`oracle ring ${obs.toBase58()} is stale (newest observation ${newest ? `${age} s` : "never"} old): wait for the venue to write a fresh observation before creating this market`);
 }
 // the non-SOL side is the underlying, unless UNDERLYING=<mint> names the other one (a SOL market on the SOL/USDC pool)
 const underlyingIsToken0 = process.env.UNDERLYING ? (mint0.toBase58() === process.env.UNDERLYING ? 1 : 0) : mint0.equals(WSOL) ? 0 : 1;

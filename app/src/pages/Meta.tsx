@@ -5,7 +5,7 @@ import { PublicKey } from "@solana/web3.js";
 import { usePoll } from "../hooks";
 import { loadMarketView, type MarketView } from "../lib/chain";
 import { fetchViews } from "../lib/views";
-import { META, type MetaPick } from "../meta";
+import { META, resolveMetaPick, type MetaPick } from "../meta";
 import { OraclePrice, Tug } from "../components/bits";
 import { bust, Flex, marketShare, useRefWallet } from "../components/Flex";
 import { CardShare } from "../components/Share";
@@ -23,7 +23,8 @@ async function loadPicks(): Promise<Views> {
   const snap = await fetchViews().catch(() => null);
   const views = await Promise.all(
     keys.map(async (k) => {
-      const hit = snap?.find((v) => v.acct.key.toBase58() === k);
+      const pick = META.find((p) => p.market === k);
+      const hit = pick && snap ? resolveMetaPick(pick, snap) : null;
       if (hit) return hit;
       try {
         return await loadMarketView(new PublicKey(k));
@@ -86,7 +87,7 @@ export default function MetaPage() {
       </header>
       <ol className="cards mc-grid" aria-label="What's spicy right now">
         {META.map((p, i) => (
-          <PickCard key={`${p.ticker}-${i}`} p={p} v={p.market ? data?.[p.market] : null} loading={loading && !data} />
+          <PickCard key={`${p.ticker}-${i}`} p={{ ...p, market: data?.[p.market]?.acct.key.toBase58() ?? p.market }} v={p.market ? data?.[p.market] : null} loading={loading && !data} />
         ))}
       </ol>
       {META.length === 0 && <p className="note">Nothing on the menu.</p>}
@@ -106,6 +107,7 @@ function PickCard({ p, v, loading }: { p: MetaPick; v: MarketView | null | undef
   const refWallet = useRefWallet();
   const to = actionPath(p);
   const coming = !p.market;
+  const unavailable = !coming && !loading && !v;
   const sideIdx: 0 | 1 | null = p.side === "UP" ? 0 : p.side === "DOWN" ? 1 : null;
   const cls = p.side === "UP" ? "up" : p.side === "DOWN" ? "down" : "vault";
   const payout = v && sideIdx !== null ? v.side[sideIdx].leverage : null;
@@ -136,6 +138,7 @@ function PickCard({ p, v, loading }: { p: MetaPick; v: MarketView | null | undef
           {p.tag}
         </span>
         {coming && <span className="badge mc-badge">coming</span>}
+        {unavailable && <span className="badge warn mc-badge">unavailable</span>}
         {v?.acct.settling && <span className="badge warn mc-badge">settling</span>}
       </div>
       <div className="mc-side-row">
@@ -150,7 +153,7 @@ function PickCard({ p, v, loading }: { p: MetaPick; v: MarketView | null | undef
             </>
           )}
         </span>
-        <span className="mc-label" title={p.thesis}>
+        <span className="mc-label" title={unavailable ? "The previous program is closed. View its historical market; trading and withdrawals are unavailable." : p.thesis}>
           {label(p)}
         </span>
       </div>

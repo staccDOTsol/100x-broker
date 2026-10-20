@@ -10,7 +10,7 @@ import { serverConnection } from "../src/lib/upstream.js";
 
 const LAUNCH = new PublicKey("6wot8WTk5WGoUQrSbFaTzMasUutYBfQDG3pNan3LG9sU");
 const LAUNCH_PROGRAM = "moontUzsdepotRGe5xsfip7vLPTJnVuafqdUWexVnPM";
-const OURS = process.env.VITE_PROGRAM_ID ?? "9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6";
+import { HISTORY_PROGRAM_IDS } from "../src/config.js";
 const MEMO = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 const MEMO_TAG = "100x.broker 0/20";
 const JUP = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
@@ -23,7 +23,7 @@ function fundAmount(tx: ParsedTransactionWithMeta): bigint | null {
   // ours if: a 100x instruction rides along (exits), or our memo tag (every 0/20 tx from now on), or a Jupiter swap feeding the
   // fund in one tx (the standalone unvault leg before the tag existed — Backable's own UI never swaps-and-funds in one go)
   const memo = ixs.some((i) => i.programId.toBase58() === MEMO && "parsed" in i && String((i as any).parsed ?? "").includes(MEMO_TAG));
-  if (!progs.has(OURS) && !memo && !progs.has(JUP)) return null;
+  if (!HISTORY_PROGRAM_IDS.some((program) => progs.has(program.toBase58())) && !memo && !progs.has(JUP)) return null;
   for (const i of ixs) {
     if (i.programId.toBase58() !== LAUNCH_PROGRAM || !("data" in i)) continue;
     const d = Buffer.from(bs58.decode(i.data));

@@ -6,6 +6,7 @@ import bs58 from "bs58";
 import { ComputeBudgetProgram, Keypair, PublicKey, TransactionInstruction, VersionedTransaction } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID, createCloseAccountInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { conn, loadMarketView, sendRaw, toV0 } from "./chain";
+import { assertTransactionDeployment } from "./deployment";
 import { cu } from "./hooked";
 import { track } from "@vercel/analytics";
 import { backIxs, MIN_SHARE_LAMPORTS, raiseOpen } from "./backable";
@@ -56,6 +57,7 @@ async function post<T>(body: Record<string, unknown>): Promise<T> {
 
 /** One wallet prompt for the whole batch when the wallet can, otherwise one prompt per transaction. */
 async function signAll(wallet: Wallet, txs: VersionedTransaction[]) {
+  await Promise.all(txs.map((tx) => assertTransactionDeployment(conn, tx)));
   if (wallet.signAllTransactions) return wallet.signAllTransactions(txs);
   if (!wallet.signTransaction) throw new Error("wallet can't sign");
   const out: VersionedTransaction[] = [];

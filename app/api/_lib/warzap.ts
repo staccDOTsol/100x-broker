@@ -5,6 +5,7 @@
 import { ComputeBudgetProgram, PublicKey, TransactionInstruction, TransactionMessage, VersionedTransaction, type AddressLookupTableAccount, type Connection } from "@solana/web3.js";
 import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { tokenProgramOf } from "../../src/lib/war.js";
+import { LIQUIDITY_ROUTER_URL } from "../../src/config.js";
 
 // a Jupiter API key (JUP_API_KEY) moves us off the shared free endpoint, which rate-limits Vercel's shared IPs
 const JUP = process.env.JUP_API_KEY ? "https://api.jup.ag/swap/v1" : "https://lite-api.jup.ag/swap/v1";
@@ -54,7 +55,7 @@ export async function tokenBalance(conn: Connection, owner: PublicKey, mint: Pub
 }
 
 // ---- our own router first (api.liquidityxyz.fun, the 1 bp composer), Jupiter as the fallback ----
-const ROUTER = process.env.ROUTER_URL ?? "https://api.liquidityxyz.fun";
+const ROUTER = (process.env.ROUTER_URL ?? process.env.LIQUIDITY_ROUTER_URL ?? LIQUIDITY_ROUTER_URL).replace(/\/$/, "");
 type Quoted = { outAmount: string; otherAmountThreshold: string } & Record<string, unknown>;
 async function routerQuote(input: string, output: string, amount: bigint): Promise<Quoted> {
   const r = await fetch(`${ROUTER}/api/quote/solana?inputMint=${input}&outputMint=${output}&amount=${amount}&slippageBps=${SLIPPAGE_BPS}&transactionVersion=0`, { signal: AbortSignal.timeout(15_000) });

@@ -37,6 +37,8 @@ import { BurnPanel } from "../components/Coin";
 import { type MarketVault, useMarketVault, useVaultCoin, yieldApy, yieldBlocker, YieldPane } from "../components/DnWidget";
 import { PumpPair } from "../components/PumpPair";
 import { PinButton } from "../components/PinButton";
+import { Feed } from "../components/Live";
+import { LEGACY_UNAVAILABLE } from "../lib/deployment";
 import { pct0 } from "./Yield";
 import { ago, amount as fmtAmount, lev, parseAmount, pct, short, usd, usdPrice } from "../lib/format";
 import { REDEEM_FEE, RFSTACC } from "../config";
@@ -58,7 +60,7 @@ export default function MarketPage() {
   }, [key]);
   const { publicKey } = useWallet();
   const view = usePoll(() => (marketKey ? loadMarketView(marketKey) : Promise.resolve(null)), [key], 6_000);
-  const v = view.data;
+  const v = view.data && marketKey && view.data.acct.key.equals(marketKey) ? view.data : null;
   // the rest of the board, for the switcher (edge snapshot, no extra RPC), and its volume/age for the order
   const others = usePoll(fetchViews, [], 30_000);
   const stats = usePoll(() => fetchMarketStats(24), [], 60_000);
@@ -101,6 +103,16 @@ export default function MarketPage() {
 
   if (!marketKey) return <NotFound what="That isn't a market address." />;
   if (view.loading && !v) return <MarketSkeleton />;
+  if (!v && view.error === LEGACY_UNAVAILABLE) return (
+    <>
+      <section className="panel" style={{ padding: 24 }}>
+        <h1>Existing market · program closed</h1>
+        <p>{LEGACY_UNAVAILABLE}</p>
+        <p><Link to="/me">View existing holdings</Link> · <Link to="/">Open the current board</Link></p>
+      </section>
+      <section className="panel" style={{ padding: 24 }}><h2>Market history</h2><Feed market={key} /></section>
+    </>
+  );
   if (!v) return <NotFound what={view.error ? `Couldn't load: ${view.error}` : "No market at this address."} />;
 
   const refresh = () => {

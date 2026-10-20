@@ -17,7 +17,7 @@ import {
   deriveDbcTokenVaultAddress,
 } from "@meteora-ag/dynamic-bonding-curve-sdk";
 
-export const PROGRAM_ID = new PublicKey(process.env.HOOKED_PROGRAM_ID ?? "9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6");
+export const PROGRAM_ID = new PublicKey(process.env.HOOKED_PROGRAM_ID ?? "3ZACDHNMHhuZkPYZQZwyXYoJCxJr8kK8yUzGoqt5FbeH");
 export const RFSTACC = new PublicKey("pSYRpDqr847kB2nD5ZhjcPsHLV2ZpUxweXm1MwiSTcc");
 export const DBC = new PublicKey("dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN");
 export const DEV_ATA = new PublicKey("6Jrrws5TmFTb4eCa63A4yNnaSCC62yvvHYspK3KW4SEd");

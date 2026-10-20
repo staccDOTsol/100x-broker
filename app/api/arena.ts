@@ -17,6 +17,7 @@
 //   GET  /api/arena?keeper=1      -> what needs doing: pokes, settles, claims, vaults outside their hedge band
 //   POST {kind:"poke"|"settle"|"claim", market, side?, payer} -> permissionless keeper calls on a market
 // The server signs nothing. It builds the same transactions the site's ticket builds; the agent signs on its own machine.
+import { assertProgramAvailable } from "../src/lib/deployment.js";
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { ComputeBudgetProgram, Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction, createCloseAccountInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
@@ -862,6 +863,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body ?? {};
     const payer = new PublicKey(String(body.payer));
     const kind = String(body.kind);
+    if (["buy", "sell", "create-market", "poke", "settle", "claim"].includes(kind)) await assertProgramAvailable(conn);
+    if (["park", "unpark", "finish", "create-vault"].includes(kind)) await assertProgramAvailable(conn, DN_PROGRAM);
     const p = await pool();
     if (kind === "park" || kind === "unpark" || kind === "finish") {
       const w = await resolveVaultQ(await vaults(), String(body.vault ?? body.market ?? ""));

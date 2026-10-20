@@ -3,9 +3,10 @@
 // put on at 100×: long the hop's output, short the hop's input. badBeat flips those two.
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { allViews } from "./_lib/views.js";
+import { COMPOSER_PROGRAM_ID, LIQUIDITY_ROUTER_URL } from "../src/config.js";
 
-const ROUTER = "https://api.liquidityxyz.fun";
-const PROGRAM = "2qiAsxua4dx5SPRD1CDXeNAKDKRepDQ1rags3vAoZ5fN";
+const ROUTER = (process.env.LIQUIDITY_ROUTER_URL ?? LIQUIDITY_ROUTER_URL).replace(/\/$/, "");
+const PROGRAM = COMPOSER_PROGRAM_ID.toBase58();
 const PROTOCOL_BPS = 1n;
 const POSITION_BPS = 10n;
 const BPS = 10_000n;
@@ -87,6 +88,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (!upstream.ok || !quote || !Array.isArray(quote.routePlan)) {
         return res.status(upstream.status || 502).json({ error: quote?.error ?? "no route" });
       }
+      if (quote.composed === true && quote.composerProgramId !== PROGRAM) {
+        return res.status(503).json({ error: "The swap router is still using a previous Composer deployment. Swaps are temporarily unavailable." });
+      }
       const hops = legs(quote.routePlan as HopIn[], badBeat);
       const mints = [...new Set(hops.flatMap((h) => [h.inputMint, h.outputMint]).filter(b58))];
       const markets = await marketsFor(mints);
@@ -108,6 +112,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (req.method !== "POST") return res.status(405).json({ error: "GET or POST" });
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body ?? {};
     if (!b58(body.userPublicKey) || !body.quoteResponse) return res.status(400).json({ error: "userPublicKey and quoteResponse" });
+    if (body.quoteResponse.composed === true && body.quoteResponse.composerProgramId !== PROGRAM) {
+      return res.status(409).json({ error: "This quote uses a previous Composer deployment. Refresh the quote before swapping." });
+    }
     const upstream = await fetch(`${ROUTER}/api/swap/solana`, {
       method: "POST",
       headers: { "content-type": "application/json" },

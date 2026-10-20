@@ -1,3 +1,4 @@
+import { assertTransactionDeployment } from "../lib/deployment";
 // 100x.broker/launch: two launchers, both pump.fun coins quoted in $100XBRO. "pump + Orca pools" (LaunchOrca.tsx, the
 // default, built entirely in the browser) spreads your first buy single-sided across Orca pools. "pump only" (below) is the
 // plain pump launch with an optional first buy and war, built by the server. You pick the name, ticker, image, description and
@@ -128,6 +129,7 @@ export default function Launch() {
       const txs = b.txs.map((t) => VersionedTransaction.deserialize(Uint8Array.from(atob(t), (c) => c.charCodeAt(0))));
       txs[b.mintTx].sign([mint]);
       for (let k = 1; k <= txs.length; k++) set(k, "active");
+      await Promise.all(txs.map((tx) => assertTransactionDeployment(conn, tx)));
       const signed = await signAllTransactions(txs);
       for (let k = 0; k < signed.length; k++) {
         i = k + 1;

@@ -3,7 +3,8 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { PublicKey, Transaction, VersionedTransaction } from "@solana/web3.js";
 import { useToasts } from "./components/Toasts";
 import { conn, sendRaw, TxFailed } from "./lib/chain";
-import { POLL_MS } from "./config";
+import { assertTransactionDeployment } from "./lib/deployment";
+import { DN_PROGRAM_ID, POLL_MS } from "./config";
 
 /** Polls `load` every `ms` (default POLL_MS) while the tab is visible. Keeps the last good value on errors. */
 export function usePoll<T>(load: () => Promise<T>, deps: unknown[], ms = POLL_MS) {
@@ -78,7 +79,7 @@ export function humanError(e: unknown): string {
   // preflight failures carry the program's line in their logs rather than the message
   const war = `${msg} ${JSON.stringify(e)}`.match(/Hbu4EByGc17GxHYyiazxDMvtL6VvKxV4aRsZW95uzfu7 failed: custom program error: 0x([0-9a-f]+)/i);
   if (war && WAR_ERRORS[parseInt(war[1], 16)]) return WAR_ERRORS[parseInt(war[1], 16)];
-  const dn = msg.match(/63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU failed: custom program error: 0x([0-9a-f]+)/i);
+  const dn = msg.match(new RegExp(`${DN_PROGRAM_ID.toBase58()} failed: custom program error: 0x([0-9a-f]+)`, "i"));
   if (dn && DN_ERRORS[parseInt(dn[1], 16)]) return DN_ERRORS[parseInt(dn[1], 16)];
   const custom = (e instanceof TxFailed ? JSON.stringify(e.detail) : msg).match(/(?:Custom"?:?\s*|0x)(\d+|[0-9a-f]+)/i);
   if (custom) {
@@ -124,6 +125,7 @@ export function useSend() {
       track("tx_try", { label: short });
       try {
         const tx = await build(publicKey);
+        await assertTransactionDeployment(conn, tx);
         stage = "sign";
         if (tx instanceof Transaction) {
           tx.feePayer = tx.feePayer ?? publicKey;

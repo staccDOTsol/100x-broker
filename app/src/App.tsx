@@ -15,6 +15,7 @@ import { CoinbaseWalletAdapter } from "@solana/wallet-adapter-coinbase";
 import { usePoll } from "./hooks";
 import { fetchActive, fetchFeed, fetchWinners } from "./lib/feed";
 import { short, usd } from "./lib/format";
+import { DeploymentNotice } from "./components/DeploymentNotice";
 import Board from "./pages/Board";
 import MarketPage from "./pages/MarketPage";
 import NewMarket from "./pages/NewMarket";
@@ -329,6 +330,7 @@ export default function App() {
                 </div>
               </header>
               {!onSwap && !embed && <NguHero />}
+              {!onSwap && !onWar && !embed && <DeploymentNotice />}
               <main>
                 <Routes>
                   <Route path="/" element={onWar ? <WarPage /> : onSwap || embed ? <SwapPage /> : <Board />} />

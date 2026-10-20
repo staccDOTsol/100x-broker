@@ -7,13 +7,14 @@ import { memo } from "./_lib/memo.js";
 import { parsedTxs, recentSigs } from "./_lib/txcache.js";
 import { serverConnection } from "../src/lib/upstream.js";
 
-const DN_PROGRAM = "63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU";
+import { HISTORY_DN_PROGRAM_IDS, HISTORY_PROGRAM_IDS } from "../src/config.js";
+const DN_PROGRAMS = new Set(HISTORY_DN_PROGRAM_IDS.map((p) => p.toBase58()));
 const VAULT_LEN = 488;
 /** Inner programs the keeper is allowed to forward through `act`, by the name the feed calls them. */
 const TARGETS: Record<string, string> = {
   CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK: "Raydium",
   dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN: "DBC hedge",
-  "9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6": "redeem",
+  ...Object.fromEntries(HISTORY_PROGRAM_IDS.map((program) => [program.toBase58(), "redeem"])),
   SP12tWFxD9oJsVWNavTTBZvMbA6gkAmxtVgxdqvyvhY: "stake pool",
 };
 
@@ -39,7 +40,7 @@ export type DnEv = {
 
 type Ix = ParsedInstruction | PartiallyDecodedInstruction;
 const allIxs = (tx: ParsedTransactionWithMeta): Ix[] => [...tx.transaction.message.instructions, ...(tx.meta?.innerInstructions ?? []).flatMap((i) => i.instructions)];
-const isOurs = (ix: Ix): ix is PartiallyDecodedInstruction => !("parsed" in ix) && ix.programId.toBase58() === DN_PROGRAM;
+const isOurs = (ix: Ix): ix is PartiallyDecodedInstruction => !("parsed" in ix) && DN_PROGRAMS.has(ix.programId.toBase58());
 
 export function classify(tx: ParsedTransactionWithMeta, shareMint: string): DnEv | null {
   if (!tx.meta || tx.meta.err) return null;
@@ -90,7 +91,7 @@ export function classify(tx: ParsedTransactionWithMeta, shareMint: string): DnEv
 const shareMintOf = (c: Connection, vault: PublicKey) =>
   memo(`dnfeed:mint:${vault.toBase58()}`, 86_400_000, 86_400_000, async () => {
     const info = await c.getAccountInfo(vault);
-    if (!info || info.data.length !== VAULT_LEN || info.owner.toBase58() !== DN_PROGRAM) throw new Error("not a vault");
+    if (!info || info.data.length !== VAULT_LEN || !DN_PROGRAMS.has(info.owner.toBase58())) throw new Error("not a vault");
     return new PublicKey(info.data.subarray(136, 168)).toBase58();
   });
 

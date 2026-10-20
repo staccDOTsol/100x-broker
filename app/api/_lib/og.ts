@@ -12,7 +12,7 @@ import { MARKET_ORACLE_KIND, VENUE_LABEL, type Venue, pumpSwapPoolOf, slotMints,
 import { classify } from "./category.js";
 import type { Category } from "../../src/lib/category.js";
 
-const PROGRAM_ID = new PublicKey(process.env.VITE_PROGRAM_ID ?? "9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6");
+import { PROGRAM_ID, CLOSED_PROGRAM_IDS, HISTORY_PROGRAM_IDS } from "../../src/config.js";
 const TOKEN_2022 = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 const ATA_PROGRAM = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 const WSOL = "So11111111111111111111111111111111111111112";
@@ -137,6 +137,7 @@ export type Side = {
   mint: PublicKey;
 };
 export type MarketCard = {
+  closed?: boolean;
   key: string;
   ticker: string;
   name: string;
@@ -273,7 +274,8 @@ export const readMarketCard = (key: PublicKey, withImage = true): Promise<Market
 async function loadMarketCard(key: PublicKey, withImage: boolean): Promise<MarketCard> {
   const c = conn();
   const mi = await c.getAccountInfo(key);
-  if (!mi || mi.data.length !== MARKET_LEN) throw new Error("market not found");
+  if (!mi || mi.data.length !== MARKET_LEN || !HISTORY_PROGRAM_IDS.some((program) => program.equals(mi.owner))) throw new Error("market not found");
+  const closed = CLOSED_PROGRAM_IDS.has(mi.owner.toBase58());
   const d = mi.data;
   const bullMint = pk(d, 8);
   const bearMint = pk(d, 40);
@@ -332,8 +334,8 @@ async function loadMarketCard(key: PublicKey, withImage: boolean): Promise<Marke
       symbol: `${asset?.symbol ?? "TOKEN"}${i === 0 ? "UP" : "DN"}`,
       decimals,
       vaultUsd: quoteUsd(vaults[i]),
-      priceUsd: sol ? price * rate * sol : null,
-      navUsd: sol ? nav * rate * sol : null,
+      priceUsd: !closed && sol ? price * rate * sol : null,
+      navUsd: !closed && sol ? nav * rate * sol : null,
       leverage: vaults[i] > 0n ? (LEVERAGE * Number(other)) / Number(vaults[i]) : other > 0n ? Infinity : NaN,
       owed: 1 - Number(u64(d, 432 + 8 * i)) / 2 ** 63,
       vaultRaw: vaults[i],
@@ -342,6 +344,7 @@ async function loadMarketCard(key: PublicKey, withImage: boolean): Promise<Marke
     };
   };
   return {
+    closed,
     key: key.toBase58(),
     ticker: asset?.symbol ?? short(underlying.toBase58()),
     name: asset?.name ?? "",
@@ -440,6 +443,7 @@ function tokenHead(m: MarketCard, size = 120) {
 }
 
 export function marketCard(m: MarketCard): El {
+  if (m.closed) return frame(tokenHead(m, 100), display("Program closed", 72), txt("Trading and withdrawals are unavailable. New markets do not unlock existing assets.", { fontSize: 30, color: C.ink2 }));
   const [up, dn] = m.sides;
   return frame(
     row(
@@ -484,6 +488,7 @@ function pnlRow(m: MarketCard, pnl: Pnl): El {
 export function positionCard(m: MarketCard, side: 0 | 1, amount: bigint, owner: string | null, pnl: Pnl | null = null): El {
   const s = m.sides[side];
   const units = Number(amount) / 10 ** s.decimals;
+  if (m.closed) return frame(display("Existing holding", 80), mono(`${units.toLocaleString("en-US")} ${s.symbol}`, 40), display("Program closed", 56), txt("Trading and withdrawals are unavailable. New markets do not unlock existing assets.", { fontSize: 28, color: C.ink2 }));
   const value = s.priceUsd === null ? null : units * s.priceUsd;
   const redeem = s.navUsd === null ? null : units * s.navUsd * 0.96;
   const color = side === 0 ? C.up : C.down;

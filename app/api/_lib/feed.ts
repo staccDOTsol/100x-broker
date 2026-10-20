@@ -14,7 +14,7 @@ const LIST_TTL = 5_000, LIST_STALE = 30_000;
 const FEED_TTL = 5_000, FEED_STALE = 60_000;
 const BOARD_TTL = 15_000, BOARD_STALE = 120_000;
 
-const PROGRAM_ID = new PublicKey(process.env.VITE_PROGRAM_ID ?? "9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6");
+import { HISTORY_PROGRAM_IDS, HISTORY_DN_PROGRAM_IDS } from "../../src/config.js";
 const DBC = "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN";
 const RFSTACC = "pSYRpDqr847kB2nD5ZhjcPsHLV2ZpUxweXm1MwiSTcc";
 const MARKET_LEN = 1008;
@@ -122,7 +122,7 @@ export function classify(tx: ParsedTransactionWithMeta, ctx: Ctx): Ev | null {
     if (f >= 0 && to >= 0 && f !== to && t.amount > 0n) paid = { from: f as 0 | 1, to: to as 0 | 1, amount: t.amount.toString() };
   }
 
-  const ours = topLevel(tx, PROGRAM_ID.toBase58()).map((ix) => bs58.decode(ix.data)[0]);
+  const ours = HISTORY_PROGRAM_IDS.flatMap((program) => topLevel(tx, program.toBase58())).map((ix) => bs58.decode(ix.data)[0]);
   const dbc = topLevel(tx, DBC).map((ix) => Buffer.from(bs58.decode(ix.data).subarray(0, 8)));
 
   if (ours.includes(0)) return { ...base, kind: "listed" };
@@ -176,12 +176,12 @@ export const marketFeed = (key: PublicKey, limit = 40): Promise<Ev[]> =>
 
 export const allMarkets = (): Promise<PublicKey[]> =>
   memo("feed:markets", LIST_TTL, LIST_STALE, async () => {
-    const res = await conn().getProgramAccounts(PROGRAM_ID, { dataSlice: { offset: 0, length: 0 }, filters: [{ dataSize: MARKET_LEN }] });
-    return res.map((r) => r.pubkey);
+    const lists = await Promise.all(HISTORY_PROGRAM_IDS.map((program) => conn().getProgramAccounts(program, { dataSlice: { offset: 0, length: 0 }, filters: [{ dataSize: MARKET_LEN }, { memcmp: { offset: 0, bytes: "JU9tGcfh7on" } }] })));
+    return lists.flat().map((r) => r.pubkey);
   });
 
 // ---------- plumbing, not people ----------
-const DN_PROGRAM = new PublicKey("63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU");
+
 /** Signs every vault rebalance, so it would top any activity list on its own. */
 const KEEPER = process.env.DN_KEEPER ?? "EGa3ng1xcuB5X9tkK7czYczhD4PpAYAJF52Vo9F2Cn7";
 /** The keeper plus every dnvault PDA and its SOL sub-account: they hold DOWN and trade it, but they are not wallets. 5 min fresh,
@@ -190,7 +190,7 @@ export const botAddresses = (): Promise<Set<string>> =>
   memo<Set<string>>("feed:bots", 300_000, 3_600_000, async () => {
     const v = new Set([KEEPER]);
     // "dnvault1" in base58, the same filter the client's listVaults uses
-    const res = await conn().getProgramAccounts(DN_PROGRAM, { filters: [{ memcmp: { offset: 0, bytes: "HoK4CZtz9b6" } }] });
+    const res = (await Promise.all(HISTORY_DN_PROGRAM_IDS.map((program) => conn().getProgramAccounts(program, { filters: [{ memcmp: { offset: 0, bytes: "HoK4CZtz9b6" } }] })))).flat();
     for (const a of res) {
       v.add(a.pubkey.toBase58());
       v.add(pk(a.account.data, 392)); // solPda
@@ -199,25 +199,30 @@ export const botAddresses = (): Promise<Set<string>> =>
   }).catch(() => peek<Set<string>>("feed:bots") ?? new Set([KEEPER]));
 
 const MEME = process.env.VITE_MEME_MINT ?? "Fr28jEWz2msSCKLaHzus2nCKrwqbpTx2EyDYtsVVpump";
-const BURN_STATE = PublicKey.findProgramAddressSync([Buffer.from("burn-state")], PROGRAM_ID)[0];
-const BURN_VAULT = PublicKey.findProgramAddressSync([Buffer.from("burn")], PROGRAM_ID)[0].toBase58();
+const BURN_ACCOUNTS = HISTORY_PROGRAM_IDS.map((program) => ({
+  state: PublicKey.findProgramAddressSync([Buffer.from("burn-state")], program)[0],
+  vault: PublicKey.findProgramAddressSync([Buffer.from("burn")], program)[0].toBase58(),
+}));
 
-function burnEv(tx: ParsedTransactionWithMeta): Ev | null {
+function burnEv(tx: ParsedTransactionWithMeta, state: PublicKey, vault: string): Ev | null {
   if (!tx.meta || tx.meta.err) return null;
   const { transfers, burns } = flows(tx);
   const b = burns.find((x) => x.mint === MEME);
   if (!b) return null;
-  const paid = transfers.filter((t) => t.source === BURN_VAULT).reduce((a, t) => a + t.amount, 0n);
-  return { sig: tx.transaction.signatures[0], ts: tx.blockTime ?? 0, kind: "burn", market: BURN_STATE.toBase58(), ticker: "100XBRO", actor: tx.transaction.message.accountKeys[0].pubkey.toBase58(), tokens: Number(b.amount) / 1e6, quote: paid.toString() };
+  const paid = transfers.filter((t) => t.source === vault).reduce((a, t) => a + t.amount, 0n);
+  return { sig: tx.transaction.signatures[0], ts: tx.blockTime ?? 0, kind: "burn", market: state.toBase58(), ticker: "100XBRO", actor: tx.transaction.message.accountKeys[0].pubkey.toBase58(), tokens: Number(b.amount) / 1e6, quote: paid.toString() };
 }
 
 /** $100X burns: every one touches the burn-state PDA. Incremental like marketFeed. */
 export const burnFeed = (limit = 20): Promise<Ev[]> =>
   memo(`feed:burn:${limit}`, FEED_TTL, FEED_STALE, async () => {
     const c = conn();
-    const sigs = await recentSigs(c, BURN_STATE, limit);
-    const txs = await parsedTxs(c, sigs.filter((s) => !s.err).map((s) => s.signature));
-    return txs.map((t) => (t ? burnEv(t) : null)).filter((e): e is Ev => !!e);
+    const lists = await Promise.all(BURN_ACCOUNTS.map(async ({ state, vault }) => {
+      const sigs = await recentSigs(c, state, limit);
+      const txs = await parsedTxs(c, sigs.filter((s) => !s.err).map((s) => s.signature));
+      return txs.map((t) => (t ? burnEv(t, state, vault) : null)).filter((e): e is Ev => !!e);
+    }));
+    return lists.flat().sort((a, b) => b.ts - a.ts).slice(0, limit);
   });
 
 export const globalFeed = (perMarket = 15): Promise<Ev[]> =>
@@ -264,7 +269,8 @@ export const walletFeed = (owner: PublicKey, perAccount = 40): Promise<Ev[]> =>
     txs.forEach((tx, i) => {
       if (!tx) return;
       const ctx = ctxOf.get(sigs[i]);
-      const ev = ctx ? classify(tx, ctx) : burnEv(tx);
+      const burn = BURN_ACCOUNTS.find(({ state }) => tx.transaction.message.accountKeys.some(({ pubkey }) => pubkey.equals(state)));
+      const ev = ctx ? classify(tx, ctx) : burn ? burnEv(tx, burn.state, burn.vault) : null;
       if (ev && ev.actor === me) out.push(ev);
     });
     return out.sort((a, b) => b.ts - a.ts).slice(0, 60);

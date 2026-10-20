@@ -3,11 +3,14 @@
 // Plans the 1-click zaps; the user signs everything, the server signs nothing.
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { PublicKey } from "@solana/web3.js";
-import { planUserSwapOut, planZapIn } from "./_lib/dnplan.js";
+import { assertProgramAvailable } from "../src/lib/deployment.js";
+import { conn } from "../src/lib/chain.js";
+import { DN_PROGRAM, planUserSwapOut, planZapIn } from "./_lib/dnplan.js";
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== "POST") return res.status(405).json({ error: "POST" });
   try {
+    await assertProgramAvailable(conn, DN_PROGRAM);
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body ?? {};
     const vault = new PublicKey(String(body.vault));
     const user = new PublicKey(String(body.user));

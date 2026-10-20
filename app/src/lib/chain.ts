@@ -18,6 +18,8 @@ import {
 } from "@meteora-ag/dynamic-bonding-curve-sdk";
 import BN from "bn.js";
 import { ALT_AUTHORITY, ALT_FALLBACK, DEFAULT_WINDOW_SECS, LEVERAGE, PROGRAM_ID, RETIRED_MARKETS, RFSTACC, RPC_URL } from "../config.js";
+import { assertInstructionDeployment, assertProgramAvailable, LEGACY_UNAVAILABLE } from "./deployment.js";
+import { CLOSED_PROGRAM_IDS } from "../config.js";
 import { failoverFetch } from "./upstream.js";
 import { type MarketKeys, cu, decodeLaunch, launchPda, settleBeginIx, settleEndIx, settleSwapIx, sideAccounts } from "./hooked.js";
 import { MARKET_ORACLE_KIND, type OracleQuote, type Venue, pumpSwapPoolOf, quoteSymbolOf, slotMints, slotSpotTick, venueOfKind } from "./venues.js";
@@ -117,6 +119,7 @@ export function decodeMarket(key: PublicKey, d: Uint8Array): MarketAccount {
 }
 
 export async function listMarketKeys(): Promise<PublicKey[]> {
+  await assertProgramAvailable(conn);
   const res = await conn.getProgramAccounts(PROGRAM_ID, {
     dataSlice: { offset: 0, length: 0 },
     // "hookmkt1" in base58: some upstreams (FluxRPC) reject base64 memcmp filters
@@ -164,7 +167,7 @@ export const RING_STALE_SECS = 3600;
 export function twapNow(obs: Uint8Array, ckpts: Ckpt[], window: number, sample?: { now: number; tick: number }) {
   const { idx, pts } = ring(obs);
   let end = pts[idx];
-  if (sample && end.ts + RING_STALE_SECS < sample.now) {
+  if (sample && window >= 150 && end.ts + RING_STALE_SECS < sample.now) {
     const newest = ckpts.filter((c) => c.ts > 0).sort((a, b) => b.ts - a.ts)[0];
     const base = newest && newest.ts >= end.ts ? newest : end;
     const dt = BigInt(Math.max(0, sample.now - base.ts));
@@ -275,6 +278,9 @@ export type SideView = {
 export async function loadMarketView(key: PublicKey): Promise<MarketView | null> {
   const mi = await conn.getAccountInfo(key);
   if (!mi) return null;
+  if (CLOSED_PROGRAM_IDS.has(mi.owner.toBase58())) throw new Error(LEGACY_UNAVAILABLE);
+  if (!mi.owner.equals(PROGRAM_ID) || mi.data.length !== MARKET_LEN || mi.data.subarray(0, 8).toString() !== "hookmkt1") return null;
+  await assertProgramAvailable(conn);
   const a = decodeMarket(key, mi.data);
   const accts = await conn.getMultipleAccountsInfo([
     a.vaultBull, a.vaultBear, a.poolBull, a.poolBear, a.bullMint, a.bearMint, a.baseVaultBull, a.baseVaultBear,
@@ -352,7 +358,7 @@ export async function loadMarketView(key: PublicKey): Promise<MarketView | null>
     // a dead ring means the market samples the pool itself: chart its checkpoints + the live tick instead
     const poolTick = Buffer.from(opool.data).readInt32LE(269);
     const { idx: ringIdx, pts: ringPts } = ring(obs.data);
-    const sampled = ringPts[ringIdx].ts + RING_STALE_SECS < nowTs;
+    const sampled = a.windowSecs >= 150 && ringPts[ringIdx].ts + RING_STALE_SECS < nowTs;
     rawSeries = sampled ? [...ckptSeries(a.ckpts), { ts: nowTs, tick: poolTick }] : oracleSeries(obs.data);
     now = twapNow(obs.data, a.ckpts, a.windowSecs, { now: Math.floor(Date.now() / 1000), tick: Buffer.from(opool.data).readInt32LE(269) });
   } else {
@@ -543,6 +549,7 @@ async function lookupTables(): Promise<AddressLookupTableAccount[]> {
 }
 
 export async function toV0(ixs: TransactionInstruction[], payer: PublicKey, extraTables: AddressLookupTableAccount[] = []) {
+  await assertInstructionDeployment(conn, ixs);
   const [{ blockhash }, tables] = await Promise.all([conn.getLatestBlockhash("confirmed"), lookupTables()]);
   return new VersionedTransaction(
     new TransactionMessage({ payerKey: payer, recentBlockhash: blockhash, instructions: ixs }).compileToV0Message([...tables, ...extraTables]),

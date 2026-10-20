@@ -68,7 +68,7 @@ function twapNow(obs: Buffer, ckpts: Pt[], window: number, sample?: { now: numbe
   for (let i = 0; i < 100; i++) pts.push({ ts: obs.readUInt32LE(51 + i * 44), tc: obs.readBigInt64LE(51 + i * 44 + 4) });
   let end = pts[idx];
   // dead ring: the program samples the pool tick itself; mirror it so our pending math matches
-  if (sample && end.ts + RING_STALE_SECS < sample.now) {
+  if (window >= SAMPLE_EVERY_SECS && sample && end.ts + RING_STALE_SECS < sample.now) {
     const newest = ckpts.filter((c) => c.ts > 0).sort((a, b) => b.ts - a.ts)[0];
     const base = newest && newest.ts >= end.ts ? newest : end;
     end = { ts: sample.now, tc: base.tc + BigInt(sample.tick) * BigInt(Math.max(0, sample.now - base.ts)) };
@@ -86,6 +86,7 @@ function twapNow(obs: Buffer, ckpts: Pt[], window: number, sample?: { now: numbe
 }
 /** Kinds 1-4 (no ring anywhere): the newest checkpoint extended with the live tick to now, averaged back over the window (oracle.rs read_sampled). */
 function sampledTwapNow(ckpts: Pt[], window: number, now: number, tick: number) {
+  if (window < SAMPLE_EVERY_SECS) return null;
   const valid = ckpts.filter((c) => c.ts > 0).sort((a, b) => b.ts - a.ts);
   const newest = valid[0];
   if (!newest || !Number.isFinite(tick)) return null;
@@ -111,7 +112,7 @@ async function chores(m: Market) {
   const kind = m.oracleKind ?? 0;
   // kind 0 reads the CLMM ring (sampling the pool tick itself once the ring is dead); kinds 1-4 always sample the venue's spot
   const tick = kind ? venueTick(kind, obs!.data, opool!.data, m.venuePool ? psPool!.data : undefined) : opool!.data.readInt32LE(269);
-  const sampled = kind ? true : obs!.data.readUInt32LE(51 + obs!.data.readUInt16LE(17) * 44) + RING_STALE_SECS < nowTs;
+  const sampled = m.windowSecs >= SAMPLE_EVERY_SECS && (kind ? true : obs!.data.readUInt32LE(51 + obs!.data.readUInt16LE(17) * 44) + RING_STALE_SECS < nowTs);
   const now = kind ? sampledTwapNow(ckpts, d.readUInt32LE(480), nowTs, tick) : twapNow(obs!.data, ckpts, d.readUInt32LE(480), { now: nowTs, tick });
   // 0. sampled markets need a heartbeat: every poke is one more point in the window
   if (sampled && nowTs - d.readUInt32LE(484) >= SAMPLE_EVERY_SECS) {
@@ -250,5 +251,6 @@ for (;;) {
   } catch (e) {
     log("loop", e instanceof Error ? e.message : e);
   }
+  if (process.env.ONCE === "1") break;
   await new Promise((r) => setTimeout(r, LOOP_MS));
 }

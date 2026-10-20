@@ -1,3 +1,4 @@
+import { assertTransactionDeployment } from "../lib/deployment";
 // A market's companion pump.fun coins: $TICKERUP / $TICKERDN, quoted in $100XBRO, creator = the connected wallet, creator fee 3%
 // split lister 10% / Launch PDA 90% (the program boosts the side's vault with 80 and burns 10). A missing side is a resumable
 // plan (2 tx + optional first buy); a launched side is a card read from /api/pumps.
@@ -217,6 +218,7 @@ function Launch({ v, ticker, market, missing, onDone }: { v: MarketView; ticker:
       }
       if (!plan.length) throw new Error("Those pumps are already live.");
       setSteps(plan.map((p) => ({ label: p.label, s: "active" })));
+      await Promise.all(plan.map((p) => assertTransactionDeployment(conn, p.tx)));
       const signed = await signAllTransactions(plan.map((p) => p.tx));
       for (let k = 0; k < plan.length; k++) {
         try {

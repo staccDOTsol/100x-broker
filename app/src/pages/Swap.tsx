@@ -1,3 +1,4 @@
+import { assertTransactionDeployment } from "../lib/deployment";
 import { useEffect, useState } from "react";
 import { PublicKey, VersionedTransaction } from "@solana/web3.js";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
@@ -6,10 +7,11 @@ import { getUnderlying, type Underlying } from "../lib/das";
 import { storedRef, swapShareUrl, tweetUrl } from "../lib/ref";
 import { loadPortfolio, type Book } from "../lib/portfolio";
 import { sendFresh } from "../lib/chain";
+import { COMPOSER_PROGRAM_ID, LIQUIDITY_ROUTER_URL } from "../config";
 
 const SOL = "So11111111111111111111111111111111111111112";
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-const ROUTER = "https://api.liquidityxyz.fun";
+const ROUTER = LIQUIDITY_ROUTER_URL;
 
 type Leg = {
   label: string;
@@ -241,8 +243,11 @@ export default function SwapPage() {
       if (refKey) q.set("ref", refKey);
       fetch(`${ROUTER}/api/quote/solana?${q}`, { signal: AbortSignal.timeout(70_000) })
         .then(async (r) => {
-          const j = (await r.json()) as { error?: string; inAmount?: string; outAmount?: string; otherAmountThreshold?: string; slippageBps?: number; routePlan?: Parameters<typeof legs>[0]; legs?: LegsSummary };
+          const j = (await r.json()) as { error?: string; inAmount?: string; outAmount?: string; otherAmountThreshold?: string; slippageBps?: number; routePlan?: Parameters<typeof legs>[0]; legs?: LegsSummary; composed?: boolean; composerProgramId?: string };
           if (!r.ok || !j.outAmount) throw new Error(j.error ?? "no route");
+          if (j.composed === true && j.composerProgramId !== COMPOSER_PROGRAM_ID.toBase58()) {
+            throw new Error("The swap router is still using a previous Composer deployment. Swaps are temporarily unavailable.");
+          }
           const quote: Quote = {
             inAmount: j.inAmount ?? raw,
             outAmount: j.outAmount,
@@ -453,6 +458,7 @@ export default function SwapPage() {
       }
       return { bytes, tx };
     });
+    await Promise.all(packed.map(({ tx }) => assertTransactionDeployment(connection, tx)));
     const v0s = packed.every((p) => p.bytes[0] !== 0x81);
     const signed = v0s && signAllTransactions
       ? await signAllTransactions(packed.map((p) => p.tx))

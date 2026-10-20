@@ -4,6 +4,7 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
 import { TOKEN_2022_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction } from "@solana/spl-token";
 import { TWO_OBS_WINDOW_SECS, conn, dbc, defaultWindowSecs, marketsForOracle, oracleHealth, sendRaw, twoObsSafe, withPendingConfig, type OracleHealth } from "../lib/chain";
+import { assertProgramAvailable } from "../lib/deployment";
 import { createMarketIx, cu, marketPda, sideAccounts, type MarketKeys } from "../lib/hooked";
 import { VENUE_LABEL, candidateEffectiveQuote, candidateMove1PctQuote, candidateMove1PctUsd, candidateTvlUsd, decodeVenuePool, discoverPools, patchPoolVolumes, poolsMissingVolume, quoteSymbolOf, type PoolCandidate, type PoolVol } from "../lib/venues";
 import { marketCurve } from "../lib/curve";
@@ -269,6 +270,7 @@ export default function NewMarket() {
     setBusy(true);
     setErr(null);
     try {
+      await assertProgramAvailable(conn);
       const payer = publicKey;
       const um = underlyingMint.toBase58();
       const exists = await conn.getMultipleAccountsInfo([kp.config.publicKey, sideAccounts(keys, 0).pool, sideAccounts(keys, 1).pool, keys.key]);

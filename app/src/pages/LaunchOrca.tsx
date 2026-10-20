@@ -1,3 +1,4 @@
+import { assertTransactionDeployment } from "../lib/deployment";
 // The default side of /launch: your coin on pump.fun, quoted in $100XBRO (3% creator fee to you), with a first buy whose
 // coins are spread single-sided across Orca pools (configs 12Nqk2 runs; 25% protocol cut) against $100XBRO plus whatever
 // quotes you pick. Every pool opens at pump's price right after your buy and runs to 10,000x it. Built and signed here in the
@@ -185,6 +186,7 @@ export function OrcaLaunch(p: { missing: string | null; name: string; symbol: st
       const price = coin ? (coin.price ?? cap / 1e9) : est!.after;
       const b = await build(todo, create, coin?.mint ?? p.mint.publicKey, price);
       const all = [...(b.zap ? [b.zap] : []), ...(b.launch ? [b.launch] : []), ...b.pools.map((x) => x.tx)];
+      await Promise.all(all.map((tx) => assertTransactionDeployment(conn, tx)));
       const signed = await signAllTransactions(all);
       if (create) remember(p.mint.publicKey.toBase58(), p.symbol);
       let k = 0;

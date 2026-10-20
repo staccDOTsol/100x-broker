@@ -16,8 +16,7 @@ import { PROGRAM_ID as HOOKED, RFSTACC } from "../lib";
 import { STAKE_POOL } from "../stakepool";
 
 export const DN_PROGRAM = new PublicKey(
-  process.env.DN_PROGRAM_ID ??
-    Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(new URL("../../target/deploy/dnvault-keypair.json", import.meta.url), "utf8")))).publicKey.toBase58(),
+  process.env.DN_PROGRAM_ID ?? "HQ7oEm6WqZVmA8PSZVXC1mX28Xnbhq3kky4QhFixdNzC",
 );
 export const RAYDIUM_CLMM = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
 export const WSOL = new PublicKey("So11111111111111111111111111111111111111112");

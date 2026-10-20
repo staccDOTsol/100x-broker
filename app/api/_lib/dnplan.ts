@@ -23,8 +23,9 @@ import { serverConnection } from "../../src/lib/upstream.js";
 
 const { ClmmInstrument, PersonalPositionLayout, PoolUtils, Raydium } = RaySdk as any;
 
-export const DN_PROGRAM = new PublicKey("63rmnKrW69fhp8bYKT21GE4kUVouMvdr1EwxHfKbvKFU");
-export const HOOKED = new PublicKey("9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6");
+import { DN_PROGRAM_ID, PROGRAM_ID } from "../../src/config.js";
+export const DN_PROGRAM = DN_PROGRAM_ID;
+export const HOOKED = PROGRAM_ID;
 export const RFSTACC = new PublicKey("pSYRpDqr847kB2nD5ZhjcPsHLV2ZpUxweXm1MwiSTcc");
 export const WSOL = new PublicKey("So11111111111111111111111111111111111111112");
 export const STAKE_POOL = new PublicKey("SzoSoRxsrL9sbFcwpbjbH5bRrzuvFtuytZTeuqZCfQ6");

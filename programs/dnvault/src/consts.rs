@@ -8,7 +8,7 @@ pub const RAYDIUM_CLMM: Address = Address::from_str_const("CAMMCzo5YL8w4VFF8KVHr
 pub const DBC: Address = Address::from_str_const("dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN");
 pub const HOOKED: Address = Address::from_str_const(match option_env!("HOOKED_PROGRAM_ID") {
     Some(s) => s,
-    None => "9g7ovqLM7LVzRN2mZCkeCeAZYafK1twhKzTNcqXtirG6",
+    None => "3ZACDHNMHhuZkPYZQZwyXYoJCxJr8kK8yUzGoqt5FbeH",
 });
 pub const WSOL: Address = Address::from_str_const("So11111111111111111111111111111111111111112");
 /// r-freestacc — every 100x market is quoted in it; valued through its stake pool rate.
