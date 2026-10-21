@@ -18,6 +18,7 @@ import { fetchActive, fetchFeed, fetchMarketStats, fetchWallets, fetchWinners, t
 import { marketShare, useRefWallet } from "../components/Flex";
 import { CardShare, Tweet } from "../components/Share";
 import { PinButton } from "../components/PinButton";
+import { ProviderTrade } from "../components/ProviderTrade";
 import { usePins } from "../lib/pins";
 import { CatEmpty, CatFilter, useCatRows } from "../components/CatFilter";
 import { catOfView } from "../lib/category";
@@ -82,7 +83,7 @@ function biggestMover(all: MarketView[], not: MarketView | undefined): { v: Mark
 }
 
 export default function Board() {
-  const { data, error, loading } = usePoll(loadBoard, []);
+  const { data, error, loading, refresh } = usePoll(loadBoard, []);
   const burn = usePoll(loadBurnPot, []);
   const feed = usePoll(() => fetchFeed(), [], 6_000);
   const wins = usePoll(fetchWinners, [], 20_000);
@@ -137,7 +138,7 @@ export default function Board() {
           {hero ? <HeroChart v={hero} feed={feed.data} wins={wins.data?.wins} moves={moves.get(hero.acct.key.toBase58()) ?? 0} /> : <span className="skeleton" style={{ height: 420 }} />}
         </div>
         <div className="tcol">
-          {hero ? <HeroTicket v={hero} /> : <span className="skeleton" style={{ height: 320 }} />}
+          {hero ? <ProviderTrade view={hero} onDone={refresh}><HeroTicket v={hero} /></ProviderTrade> : <span className="skeleton" style={{ height: 320 }} />}
           <SpawnCard />
           <HouseRules />
         </div>

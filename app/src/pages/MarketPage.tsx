@@ -17,7 +17,7 @@ import BN from "bn.js";
 import { usePoll, useSend } from "../hooks";
 import { useUnderlying } from "../hooks/underlying";
 import { usePrices } from "../hooks/price";
-import { type Balances, buildSettleTx, curveCapacity, dbc, explorer, loadMarketView, toV0, userBalances, type MarketView } from "../lib/chain";
+import { type Balances, buildSettleTx, conn, curveCapacity, dbc, explorer, loadMarketView, toV0, userBalances, type MarketView } from "../lib/chain";
 import { claimFeesIx, cu, pokeIx, sideAccounts } from "../lib/hooked";
 import { depositOut, depositSolIx, poolState, withdrawCapacity, withdrawOut, type PoolState } from "../lib/zap";
 import { curveQuote as curveQuoteFor, exitIxs, planExit, potQuote as potQuoteFor, redeemIxs, sellBackEstimate, whatIf } from "../lib/exit";
@@ -37,8 +37,10 @@ import { BurnPanel } from "../components/Coin";
 import { type MarketVault, useMarketVault, useVaultCoin, yieldApy, yieldBlocker, YieldPane } from "../components/DnWidget";
 import { PumpPair } from "../components/PumpPair";
 import { PinButton } from "../components/PinButton";
+import { ProviderTrade } from "../components/ProviderTrade";
 import { Feed } from "../components/Live";
 import { LEGACY_UNAVAILABLE } from "../lib/deployment";
+import { rememberMarket, replacementMarket } from "../lib/market-navigation";
 import { pct0 } from "./Yield";
 import { ago, amount as fmtAmount, lev, parseAmount, pct, short, usd, usdPrice } from "../lib/format";
 import { REDEEM_FEE, RFSTACC } from "../config";
@@ -82,11 +84,7 @@ export default function MarketPage() {
   // the nav's "Trade" reopens the last market that actually loaded
   useEffect(() => {
     if (!v) return;
-    try {
-      localStorage.setItem("lastMarket", v.acct.key.toBase58());
-    } catch {
-      /* private mode */
-    }
+    rememberMarket(v.acct.key);
   }, [v?.acct.key.toBase58()]);
 
   // deep-linked panel: the fragment is evaluated before the panel exists, so re-apply it once rendered
@@ -104,14 +102,7 @@ export default function MarketPage() {
   if (!marketKey) return <NotFound what="That isn't a market address." />;
   if (view.loading && !v) return <MarketSkeleton />;
   if (!v && view.error === LEGACY_UNAVAILABLE) return (
-    <>
-      <section className="panel" style={{ padding: 24 }}>
-        <h1>Existing market · program closed</h1>
-        <p>{LEGACY_UNAVAILABLE}</p>
-        <p><Link to="/me">View existing holdings</Link> · <Link to="/">Open the current board</Link></p>
-      </section>
-      <section className="panel" style={{ padding: 24 }}><h2>Market history</h2><Feed market={key} /></section>
-    </>
+    <ClosedMarket key={key} marketKey={marketKey} active={others.data ?? []} />
   );
   if (!v) return <NotFound what={view.error ? `Couldn't load: ${view.error}` : "No market at this address."} />;
 
@@ -187,7 +178,9 @@ export default function MarketPage() {
           </div>
         </div>
         <div className="tcol mkt-side">
-          <Ticket v={v} ticker={ticker} bal={bal.data ?? null} pool={pool.data ?? null} vault={vault} onDone={refresh} />
+          <ProviderTrade view={v} onDone={refresh}>
+            <Ticket v={v} ticker={ticker} bal={bal.data ?? null} pool={pool.data ?? null} vault={vault} onDone={refresh} />
+          </ProviderTrade>
           <PnlCard />
           <HouseRules ticker={ticker} rulesHref="#rules" />
         </div>
@@ -244,6 +237,24 @@ export default function MarketPage() {
         </div>
       </section>
       {share && <ShareSheet target={share} onClose={() => setShare(null)} />}
+    </>
+  );
+}
+
+function ClosedMarket({ marketKey, active }: { marketKey: PublicKey; active: MarketView[] }) {
+  const key = marketKey.toBase58();
+  const activeKeys = active.map((v) => v.acct.key.toBase58()).join(",");
+  const replacement = usePoll(() => replacementMarket(conn, marketKey, active), [key, activeKeys], 60_000);
+  const current = replacement.data;
+  return (
+    <>
+      <section className="panel" style={{ padding: 24 }}>
+        <h1>Existing market · program closed</h1>
+        <p>{LEGACY_UNAVAILABLE}</p>
+        {current && <p><Link className="btn signal" to={`/m/${current.acct.key.toBase58()}`}>Open the new ${current.ticker} market →</Link></p>}
+        <p><Link to="/me">View existing holdings</Link> · <Link to="/">Open the current board</Link></p>
+      </section>
+      <section className="panel" style={{ padding: 24 }}><h2>Market history</h2><Feed market={key} /></section>
     </>
   );
 }

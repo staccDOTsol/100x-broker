@@ -19,7 +19,7 @@ const programs = {
 const accounts = await conn.getMultipleAccountsInfo(Object.values(programs).map((p) => new PublicKey(p)));
 const dependencies = await Promise.all(Object.entries(programs).map(async ([name, address], i) => {
   const a = accounts[i];
-  const pd = a?.owner.toBase58() === "BPFLoaderUpgradeab1e11111111111111111111" && a.data.readUInt32LE(0) === 2
+  const pd = a?.owner.toBase58() === "BPFLoaderUpgradeab1e11111111111111111111111" && a.data.readUInt32LE(0) === 2
     ? new PublicKey(a.data.subarray(4, 36)) : null;
   const pdInfo = pd ? await conn.getAccountInfo(pd) : null;
   return { name, address, executable: !!a?.executable, programData: pd?.toBase58(), programDataPresent: !!pdInfo,

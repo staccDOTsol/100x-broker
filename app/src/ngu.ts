@@ -24,7 +24,7 @@ export const NGU = {
   taxBps: 690 as number | null,
   /** true once the mint's transfer-fee config authority is null. */
   taxLocked: false as boolean | null,
-  poolFees: { epochBps: 0, depositBps: 0, withdrawBps: 0 } as { epochBps: number; depositBps: number; withdrawBps: number } | null,
+  poolFees: { epochBps: 0, depositBps: 100, withdrawBps: 0 } as { epochBps: number; depositBps: number; withdrawBps: number } | null,
   /** true once `solana program set-upgrade-authority --final` has run. */
   programImmutable: false,
   validatorVote: null as string | null,

@@ -12,7 +12,7 @@ export function NguHero() {
         Staked SOL whose SOL rate <em>only goes up</em>
       </span>
       <span className="ngu-hero-sub">
-        Every transfer is taxed; half the tax is burned, half becomes liquidity nobody can pull. Volume is the yield.
+        Every transfer is taxed; 90% of the tax is burned, the rest buys $100XBRO and becomes liquidity nobody can pull. Volume is the yield.
       </span>
       {!here && <span className="ngu-hero-cta">{NGU_LABEL()} →</span>}
     </>

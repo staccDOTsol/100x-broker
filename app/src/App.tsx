@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { NavLink, Navigate, Route, Routes, Link, useLocation } from "react-router-dom";
 import { captureRef } from "./lib/ref";
 import { ConnectionProvider, WalletProvider, useWallet } from "@solana/wallet-adapter-react";
@@ -19,7 +19,6 @@ import { DeploymentNotice } from "./components/DeploymentNotice";
 import Board from "./pages/Board";
 import MarketPage from "./pages/MarketPage";
 import NewMarket from "./pages/NewMarket";
-import Launch from "./pages/Launch";
 import PortfolioPage from "./pages/Portfolio";
 import VaultRedirect from "./pages/VaultRedirect";
 import MetaPage from "./pages/Meta";
@@ -31,6 +30,7 @@ import WrapPage from "./pages/Wrap";
 import WarPage, { NewWarPage, WarLobby, WatchPage } from "./pages/War";
 import WarAction from "./pages/WarAction";
 import { HERO_MARKET, NETWORK, RPC_URL } from "./config";
+import { lastMarket, subscribeMarket } from "./lib/market-navigation";
 import { Icon } from "./components/Icons";
 import { NguHero } from "./components/NguHero";
 import NguPage from "./pages/Ngu";
@@ -183,15 +183,6 @@ function LiveToasts() {
   return null;
 }
 
-const LAST_MARKET = "lastMarket";
-const lastMarket = () => {
-  try {
-    return localStorage.getItem(LAST_MARKET) ?? HERO_MARKET;
-  } catch {
-    return HERO_MARKET;
-  }
-};
-
 /** The slim side rail: every section as an icon (labels show on hover and on narrow screens, where it becomes a scroll row). */
 function RailNav({ cat, trade }: { cat: ReturnType<typeof carriedCat>; trade: string }) {
   const loc = useLocation();
@@ -199,7 +190,7 @@ function RailNav({ cat, trade }: { cat: ReturnType<typeof carriedCat>; trade: st
     { to: withCat("/", cat), label: "Markets", icon: Icon.markets, end: true },
     { to: trade, label: "Trade", icon: Icon.trade, on: loc.pathname.startsWith("/m/") },
     { to: withCat("/new", cat), label: "New market", icon: Icon.plus },
-    { to: "/launch", label: "Launch", icon: Icon.launch },
+    { to: "/new", label: "Launch", icon: Icon.launch },
     { to: withCat("/me", cat), label: "Bag", icon: Icon.bag },
     { to: "/meta", label: "Spicy", icon: Icon.spicy },
     { to: "/wrap", label: "Wrap", icon: Icon.wrap },
@@ -232,7 +223,7 @@ export default function App() {
   const loc = useLocation();
   useEffect(() => captureRef(loc.search), [loc.search]);
   // "Trade" in the nav reopens the last market that loaded (MarketPage writes it), the hero market before that
-  const last = lastMarket();
+  const last = useSyncExternalStore(subscribeMarket, lastMarket, () => HERO_MARKET);
   const trade = last ? `/m/${last}` : "/";
   // Memes · Majors · Stonks rides along the list pages' nav links (this page's `cat`, else the remembered one)
   const cat = carriedCat(loc.search);
@@ -316,6 +307,9 @@ export default function App() {
                         <NavLink to={withCat("/winners", cat)} className="nav-winners">
                           Leaderboard
                         </NavLink>
+                        <a href="https://safufun.xyz" className="nav-safu" title="safu memes: LSTs backed by SOL that Jupiter and OKX fill at nav">
+                          Safu memes
+                        </a>
                       </span>
                       <NavLink to={withCat("/new", cat)} className="btn signal small spawn" title="Anyone can list a market on any coin">
                         + New<span className="hide-xs">{"\u00a0"}market</span>
@@ -329,7 +323,7 @@ export default function App() {
                   )}
                 </div>
               </header>
-              {!onSwap && !embed && <NguHero />}
+              {!onSwap && !embed && loc.pathname === "/ngu" && <NguHero />}
               {!onSwap && !onWar && !embed && <DeploymentNotice />}
               <main>
                 <Routes>
@@ -344,7 +338,7 @@ export default function App() {
                   <Route path="/bag" element={<SwapBagPage />} />
                   <Route path="/m/:key" element={<MarketPage />} />
                   <Route path="/new" element={<NewMarket />} />
-                  <Route path="/launch" element={<Launch />} />
+                  <Route path="/launch" element={<Navigate to={{ pathname: "/new", search: loc.search }} replace />} />
                   <Route path="/me" element={<PortfolioPage />} />
                   <Route path="/p/:wallet" element={<PortfolioPage />} />
                   {/* yield lives on the market pages now (?side=yield); the old routes bounce there */}

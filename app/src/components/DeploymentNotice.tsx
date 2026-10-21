@@ -13,9 +13,10 @@ async function readStatus(): Promise<DeploymentStatus> {
 
 export function DeploymentNotice() {
   const status = usePoll(readStatus, [], 30_000);
+  if (!status.error && status.data?.available) return null;
   return (
     <aside className="panel" role="status" style={{ margin: "12px auto", padding: "14px 18px", maxWidth: 1440 }}>
-      <strong>{status.error || (!status.data?.available ? status.data?.reason ?? "Checking trading availability…" : "New markets use the replacement program.")}</strong>
+      <strong>{status.error || status.data?.reason || "Checking trading availability…"}</strong>
       <p style={{ margin: "6px 0 0" }}>
         Positions from the closed programs remain unavailable. New markets do not unlock those assets.{" "}
         <Link to="/me">View existing holdings and history →</Link>

@@ -1,6 +1,6 @@
 import { getTransferHook, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID, unpackAccount, unpackMint } from "@solana/spl-token";
 import { type Connection, PublicKey } from "@solana/web3.js";
-import { LEGACY_DN_PROGRAM_ID, LEGACY_PROGRAM_IDS } from "../config.js";
+import { LEGACY_DN_PROGRAM_IDS, LEGACY_PROGRAM_IDS } from "../config.js";
 import { tokenMetadata } from "./chain.js";
 
 export type LegacyPosition = { mint: string; programId: string; symbol: string; decimals: number; amount: bigint };
@@ -55,11 +55,11 @@ async function legacyYieldPositions(connection: Connection, owner: PublicKey): P
     const authorities = await connection.getMultipleAccountsInfo(mints.map((mint) => mint.mintAuthority!));
     authorities.forEach((vault, i) => {
       const mint = mints[i];
-      if (!vault?.owner.equals(LEGACY_DN_PROGRAM_ID) || vault.data.length !== 488
+      if (!vault || !LEGACY_DN_PROGRAM_IDS.some((program) => vault.owner.equals(program)) || vault.data.length !== 488
         || vault.data.subarray(0, 8).toString() !== "dnvault1"
         || !new PublicKey(vault.data.subarray(136, 168)).equals(mint.address)) return;
       positions.push({
-        mint: mint.address.toBase58(), programId: LEGACY_DN_PROGRAM_ID.toBase58(),
+        mint: mint.address.toBase58(), programId: vault.owner.toBase58(),
         symbol: "Yield vault receipt", decimals: mint.decimals, amount: balances.get(mint.address.toBase58())!,
       });
     });

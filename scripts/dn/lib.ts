@@ -16,7 +16,7 @@ import { PROGRAM_ID as HOOKED, RFSTACC } from "../lib";
 import { STAKE_POOL } from "../stakepool";
 
 export const DN_PROGRAM = new PublicKey(
-  process.env.DN_PROGRAM_ID ?? "HQ7oEm6WqZVmA8PSZVXC1mX28Xnbhq3kky4QhFixdNzC",
+  process.env.DN_PROGRAM_ID ?? "2BR8GRZu1ZLeunPdAfhY1vhZuCS4mW3Aei8aGG3MiNCj",
 );
 export const RAYDIUM_CLMM = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
 export const WSOL = new PublicKey("So11111111111111111111111111111111111111112");

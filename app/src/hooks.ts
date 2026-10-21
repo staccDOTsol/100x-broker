@@ -114,7 +114,7 @@ export function useSend() {
   const { publicKey, signTransaction } = useWallet();
   const toasts = useToasts();
   return useCallback(
-    async (label: string, build: (payer: PublicKey) => Promise<Built>) => {
+    async (label: string, build: (payer: PublicKey) => Promise<Built>, beforeSign?: () => void) => {
       if (!publicKey || !signTransaction) {
         toasts.push({ s: "err", title: label, body: "Connect a wallet first." });
         return null;
@@ -132,6 +132,8 @@ export function useSend() {
           tx.recentBlockhash = (await conn.getLatestBlockhash("confirmed")).blockhash;
         }
         toasts.update(id, { body: "Your wallet wants a word" });
+        // Callers with cancellable quote flows recheck their selection after every asynchronous build/deployment check.
+        beforeSign?.();
         const signed = await signTransaction(tx);
         stage = "send";
         toasts.update(id, { body: "In flight. Say something nice to the validators." });

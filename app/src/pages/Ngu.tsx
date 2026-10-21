@@ -56,9 +56,9 @@ export default function NguPage() {
             <Stat k="cranks" v={i ? String(i.cranks) : "…"} />
           </div>
           <p className="ngu-lead">
-            Every $NGU transfer pays a {tax} tax. A permissionless crank burns half of it, buys $100XBRO with a sixth and adds the rest to
-            liquidity the program owns forever. Burns shrink supply while the SOL stays in the pool, so SOL per $NGU can only rise. Volume is
-            the yield.
+            Every $NGU transfer pays a {tax} tax. A permissionless crank burns 90% of it; of the rest, a third buys $100XBRO on Orca and
+            two thirds pair with it as liquidity the program owns forever. Burns shrink supply while the SOL stays in the pool, so SOL per
+            $NGU can only rise. Volume is the yield.
           </p>
         </div>
         <Trade info={i} refresh={info.refresh} />
@@ -68,15 +68,15 @@ export default function NguPage() {
 
       <section>
         <h2 className="meta">every tax, split</h2>
-        <div className="ngu-split" role="img" aria-label="3/6 burned, 1/6 to $100XBRO, 2/6 to liquidity">
-          <span className="burn" style={{ flex: 3 }}>
-            3/6 burned
+        <div className="ngu-split" role="img" aria-label="90% burned, 3.3% to $100XBRO, 6.7% to liquidity">
+          <span className="burn" style={{ flex: 27 }}>
+            90% burned
           </span>
           <span className="fr28" style={{ flex: 1 }}>
-            1/6 → $100XBRO
+            → $100XBRO
           </span>
           <span className="lp" style={{ flex: 2 }}>
-            2/6 → liquidity
+            → liquidity
           </span>
         </div>
         <ul className="howto ngu-howto">
@@ -86,7 +86,7 @@ export default function NguPage() {
           </li>
           <li>
             <b className="display">Hold</b>
-            <p>Every transfer and trade anyone makes pays {tax}. The crank burns half, so SOL per $NGU rises for everyone holding.</p>
+            <p>Every transfer and trade anyone makes pays {tax}. The crank burns 90% of it, so SOL per $NGU rises for everyone holding; the other 10% buys $100XBRO and locks it as liquidity.</p>
           </li>
           <li>
             <b className="display">Sell</b>
@@ -121,7 +121,7 @@ export default function NguPage() {
         <ol className="ngu-lessons">
           <li>
             <b>The tax goes to a program, not a wallet.</b> stacSOL's withheld fees answered to one wallet; when it was compromised the burn
-            loop died with it. Here, only the crank program's address can collect them, and it can only split them three ways.
+            loop died with it. Here, only the crank program's address can collect them, and it can only split them the way the label says: at least half must burn, forever.
           </li>
           <li>
             <b>Anyone can run the crank.</b> stacSOL went eight epochs without an update and buying stopped. This crank needs no key, it keeps
